@@ -1,3 +1,21 @@
+## Windows Collector v1.0.2 배치파일 수정
+
+Windows CMD에서 한글/UTF-8 배치파일이 깨지는 문제를 방지하기 위해 다음 파일을 **ASCII + CRLF + BOM 없음**으로 다시 작성했습니다.
+
+- `collector/setup_windows.bat`
+- `collector/start_collector.bat`
+- `collector/install_autostart_task.bat`
+- `collector/remove_autostart_task.bat`
+
+권장 실행 순서:
+1. Python 3.10 이상 설치 (`Add Python to PATH` 체크)
+2. `setup_windows.bat` 실행
+3. 자동으로 열리는 `collector_config.json` 저장
+4. `start_collector.bat`로 수동 동작 확인
+5. 정상 수집 확인 후 `install_autostart_task.bat`를 **관리자 권한**으로 실행
+
+> v1.0.1 패키지에는 BAT 파일이 누락된 문제가 있었으며 v1.0.2에서 포함·수정했습니다.
+
 # 대운교통 SafeDrive NEW v1.0
 
 대운교통(주)의 **배차표 + CDT(타코) + 창원 BIS/TAGO + 교통안전공단 eTAS 리포트**를 연결해 기사별 안전운행 분석 결과를 제공하는 웹앱입니다.
@@ -359,3 +377,16 @@ CDT 파서는 이전 제공된 실제 DT-202 원본 2건으로 재시험했습�
 - Collector의 TAGO 차량교체 판정은 공개 BIS의 위치변화에 근거한 후보판정입니다. 실제 운행순위/차량교체 확정은 초기 시범기간에 회사 BIS 기록과 대조해야 합니다.
 - 상세 검증결과: `docs/VALIDATION_REPORT.md`
 - 설치 체크리스트: `docs/INSTALL_CHECKLIST.md`
+
+## 로그인에서 `function crypt(...) does not exist` 오류가 날 때
+
+Supabase의 `pgcrypto` 확장 기능은 보통 `extensions` 스키마에 설치됩니다. 초기 v1.0.0 SQL의 로그인 함수는 `search_path=public`으로 고정되어 있어 프로젝트 환경에 따라 `crypt()`/`gen_salt()`를 찾지 못할 수 있습니다.
+
+기존 DB를 삭제하거나 다시 만들 필요는 없습니다.
+
+1. Supabase Dashboard → SQL Editor를 엽니다.
+2. `sql/02_login_crypt_hotfix.sql` 내용을 전체 복사하여 실행합니다.
+3. 결과의 `extension_schema`가 `extensions` 또는 `public`으로 표시되고, 관리자 계정이 조회되는지 확인합니다.
+4. 웹앱을 새로고침하고 다시 로그인합니다.
+
+v1.0.1의 `sql/01_schema.sql`에는 이 수정이 이미 반영되어 있습니다.

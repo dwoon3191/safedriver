@@ -1,6 +1,7 @@
 -- 대운교통 SafeDrive NEW v1.0
 -- Supabase SQL Editor에서 전체 실행
-create extension if not exists pgcrypto;
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
 
 create table if not exists public.app_users (
   id uuid primary key default gen_random_uuid(),
@@ -230,7 +231,7 @@ values ('관리자','관리자','admin',crypt('1111',gen_salt('bf',10)),true)
 on conflict(login_id) do nothing;
 
 create or replace function public._session_user_id(p_token text)
-returns uuid language plpgsql security definer set search_path=public as $$
+returns uuid language plpgsql security definer set search_path=public,extensions as $$
 declare v_uid uuid;
 begin
   select s.user_id into v_uid
@@ -240,7 +241,7 @@ begin
 end $$;
 
 create or replace function public._require_admin(p_token text)
-returns uuid language plpgsql security definer set search_path=public as $$
+returns uuid language plpgsql security definer set search_path=public,extensions as $$
 declare v_uid uuid;
 begin
   v_uid:=public._session_user_id(p_token);
@@ -251,14 +252,14 @@ begin
 end $$;
 
 create or replace function public._audit(p_uid uuid,p_action text,p_entity text default null,p_entity_id text default null,p_detail jsonb default '{}'::jsonb)
-returns void language plpgsql security definer set search_path=public as $$
+returns void language plpgsql security definer set search_path=public,extensions as $$
 begin
   insert into public.audit_logs(user_id,action,entity_type,entity_id,detail)
   values(p_uid,p_action,p_entity,p_entity_id,coalesce(p_detail,'{}'::jsonb));
 end $$;
 
 create or replace function public.app_login(p_login_id text,p_password text)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_u public.app_users; v_token uuid;
 begin
   select * into v_u from public.app_users where login_id=trim(p_login_id) and active=true;
@@ -273,7 +274,7 @@ begin
 end $$;
 
 create or replace function public.app_me(p_token text)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_uid uuid; v_u public.app_users;
 begin
   v_uid:=public._session_user_id(p_token); if v_uid is null then raise exception '세션이 만료되었습니다.'; end if;
@@ -282,7 +283,7 @@ begin
 end $$;
 
 create or replace function public.app_change_password(p_token text,p_old_password text,p_new_password text)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_uid uuid; v_hash text;
 begin
   v_uid:=public._session_user_id(p_token); if v_uid is null then raise exception '세션이 만료되었습니다.'; end if;
@@ -295,7 +296,7 @@ begin
 end $$;
 
 create or replace function public.app_logout(p_token text)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_uid uuid;
 begin
   v_uid:=public._session_user_id(p_token);
@@ -305,7 +306,7 @@ begin
 end $$;
 
 create or replace function public.admin_import_dispatch(p_token text,p_rows jsonb,p_source_file text)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_admin uuid; r jsonb; v_driver uuid; v_count int:=0; v_date date; v_start timestamptz; v_end timestamptz;
 begin
   v_admin:=public._require_admin(p_token);
@@ -338,7 +339,7 @@ begin
 end $$;
 
 create or replace function public.admin_import_etas(p_token text,p_report jsonb)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_admin uuid; v_driver uuid; v_report_id bigint; v_pub_id bigint; b jsonb; v_month date;
 begin
   v_admin:=public._require_admin(p_token);
@@ -367,21 +368,21 @@ begin
 end $$;
 
 create or replace function public.collector_get_dispatch(p_token text,p_service_date date)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 begin
   perform public._require_admin(p_token);
   return coalesce((select jsonb_agg(to_jsonb(d) order by d.route_no,d.run_order,d.shift_type) from public.dispatch_assignments d where d.service_date=p_service_date),'[]'::jsonb);
 end $$;
 
 create or replace function public.collector_get_vehicle_changes(p_token text,p_service_date date)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 begin
   perform public._require_admin(p_token);
   return coalesce((select jsonb_agg(to_jsonb(v) order by v.detected_at) from public.vehicle_change_events v where v.service_date=p_service_date),'[]'::jsonb);
 end $$;
 
 create or replace function public.collector_ingest_vehicle_changes(p_token text,p_changes jsonb)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_admin uuid; r jsonb; v_driver uuid; v_count int:=0;
 begin
   v_admin:=public._require_admin(p_token);
@@ -397,7 +398,7 @@ begin
 end $$;
 
 create or replace function public.collector_ingest_taco(p_token text,p_import jsonb,p_events jsonb,p_summaries jsonb)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_admin uuid; v_import_id bigint; r jsonb; s jsonb; v_driver uuid; v_pub_id bigint; v_pub_summary jsonb; v_event_count int:=0; v_sum_count int:=0;
 begin
   v_admin:=public._require_admin(p_token);
@@ -448,7 +449,7 @@ begin
 end $$;
 
 create or replace function public.driver_dashboard(p_token text,p_limit int default 20)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_uid uuid; v_name text;
 begin
   v_uid:=public._session_user_id(p_token); if v_uid is null then raise exception '세션이 만료되었습니다.'; end if;
@@ -464,7 +465,7 @@ begin
 end $$;
 
 create or replace function public.driver_acknowledge(p_token text,p_publication_id bigint,p_comment text default null)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_uid uuid;
 begin
   v_uid:=public._session_user_id(p_token); if v_uid is null then raise exception '세션이 만료되었습니다.'; end if;
@@ -476,7 +477,7 @@ begin
 end $$;
 
 create or replace function public.admin_dashboard(p_token text,p_service_date date default current_date)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_admin uuid;
 begin
   v_admin:=public._require_admin(p_token);
@@ -495,21 +496,21 @@ begin
 end $$;
 
 create or replace function public.admin_list_dispatch(p_token text,p_service_date date)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 begin
   perform public._require_admin(p_token);
   return coalesce((select jsonb_agg(to_jsonb(d) order by route_no,run_order,shift_type,vehicle_no) from public.dispatch_assignments d where service_date=p_service_date),'[]'::jsonb);
 end $$;
 
 create or replace function public.admin_list_users(p_token text)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 begin
   perform public._require_admin(p_token);
   return coalesce((select jsonb_agg(x) from (select id,login_id,display_name,role,must_change_password,active,last_login_at,created_at from public.app_users order by role,display_name) x),'[]'::jsonb);
 end $$;
 
 create or replace function public.admin_reset_password(p_token text,p_user_id uuid)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 declare v_admin uuid;
 begin
   v_admin:=public._require_admin(p_token);
@@ -520,14 +521,14 @@ begin
 end $$;
 
 create or replace function public.admin_ack_status(p_token text,p_limit int default 200)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 begin
   perform public._require_admin(p_token);
   return coalesce((select jsonb_agg(x) from (select p.id,p.driver_name,p.period_start,p.period_end,p.title,p.source,p.published_at,a.acknowledged_at,a.comment from public.driver_publications p left join public.driver_acknowledgements a on a.publication_id=p.id and a.user_id=p.driver_user_id order by p.published_at desc limit p_limit) x),'[]'::jsonb);
 end $$;
 
 create or replace function public.admin_audit(p_token text,p_limit int default 200)
-returns jsonb language plpgsql security definer set search_path=public as $$
+returns jsonb language plpgsql security definer set search_path=public,extensions as $$
 begin
   perform public._require_admin(p_token);
   return coalesce((select jsonb_agg(x) from (select l.id,u.display_name user_name,l.action,l.entity_type,l.entity_id,l.detail,l.created_at from public.audit_logs l left join public.app_users u on u.id=l.user_id order by l.created_at desc limit p_limit) x),'[]'::jsonb);

@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, date, timezone
 from collections import defaultdict
 
-VERSION='DaewoonCollector-1.0.0'
+VERSION='DaewoonCollector-1.0.2'
 KST=timezone(timedelta(hours=9))
 DTG_EPOCH=datetime(2000,1,1)
 RECORD_SIZE=128

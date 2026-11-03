@@ -33,3 +33,9 @@
 - [ ] Build command 없음
 - [ ] Publish directory `.`
 - [ ] 운영 URL에서 로그인 및 모바일 화면 시험
+
+## Windows Collector v1.0.2 확인
+- [ ] BAT 파일이 `collector` 폴더에 모두 존재하는지 확인
+- [ ] `setup_windows.bat` 실행 시 깨진 한글/명령 오류가 없는지 확인
+- [ ] `start_collector.bat` 수동 실행 정상 확인
+- [ ] 자동실행은 수동 시험 후 관리자 권한으로 등록
