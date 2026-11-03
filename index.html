@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0f3557" />
+  <title>대운교통 SafeDrive</title>
+  <link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+  <main id="setupView" class="center-page hidden">
+    <section class="auth-card wide-card">
+      <div class="brand-mark">D</div>
+      <h1>대운교통 SafeDrive</h1>
+      <p class="muted">Supabase 연결정보를 처음 한 번 설정합니다.</p>
+      <label>Supabase URL<input id="setupUrl" placeholder="https://xxxx.supabase.co"></label>
+      <label>Publishable / anon key<textarea id="setupKey" rows="4" placeholder="eyJ..."></textarea></label>
+      <button id="saveSetupBtn" class="btn primary">연결정보 저장</button>
+      <p class="small muted">브라우저에 저장되는 값은 공개용 anon/publishable key만 사용하세요. service_role key는 입력하지 마십시오.</p>
+    </section>
+  </main>
+
+  <main id="loginView" class="center-page hidden">
+    <section class="auth-card">
+      <div class="brand-mark">D</div>
+      <h1>대운교통 SafeDrive</h1>
+      <p class="muted">기사 본인은 이름으로 로그인합니다.</p>
+      <label>로그인 ID<input id="loginId" autocomplete="username" placeholder="예: 강명구B"></label>
+      <label>비밀번호<input id="loginPw" type="password" autocomplete="current-password" placeholder="초기 비밀번호 1111"></label>
+      <button id="loginBtn" class="btn primary full">로그인</button>
+      <div class="login-help">기사 초기 비밀번호 <b>1111</b> · 첫 로그인 후 반드시 변경</div>
+      <button id="openSetupBtn" class="btn text-btn">Supabase 연결 설정</button>
+    </section>
+  </main>
+
+  <div id="appView" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="side-brand"><span class="mini-logo">D</span><div><b>SafeDrive</b><small>대운교통(주)</small></div></div>
+      <nav id="nav"></nav>
+      <div class="side-bottom">
+        <div id="userBox" class="user-box"></div>
+        <button id="logoutBtn" class="btn ghost full">로그아웃</button>
+      </div>
+    </aside>
+    <section class="workspace">
+      <header class="topbar">
+        <button id="menuBtn" class="menu-btn">☰</button>
+        <div><h2 id="pageTitle">대시보드</h2><p id="pageSubtitle" class="muted"></p></div>
+        <div id="topActions"></div>
+      </header>
+      <div id="page" class="page"></div>
+    </section>
+  </div>
+
+  <div id="modal" class="modal hidden"><div class="modal-card"><button id="modalClose" class="modal-close">×</button><div id="modalBody"></div></div></div>
+
+  <script src="config.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

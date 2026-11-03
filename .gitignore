@@ -1,0 +1,4 @@
+collector/collector_config.json
+collector/collector_state.json
+.DS_Store
+Thumbs.db
