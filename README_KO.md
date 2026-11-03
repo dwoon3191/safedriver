@@ -396,3 +396,33 @@ v1.0.1의 `sql/01_schema.sql`에는 이 수정이 이미 반영되어 있습니�
 웹 로그인 또는 Collector에서 `function crypt(text, text) does not exist`가 표시되면, Supabase SQL Editor에서 `sql/03_pgcrypto_full_repair.sql` 전체를 한 번 실행하세요. 이 복구 SQL은 pgcrypto를 `extensions` 스키마로 정규화하고 로그인/비밀번호 변경/기사계정 생성 RPC에서 `extensions.crypt()`와 `extensions.gen_salt()`를 명시적으로 사용하도록 재생성합니다. 기존 운행 데이터는 삭제하지 않습니다.
 
 복구 후 웹에서 `관리자 / 1111`로 로그인하여 첫 비밀번호를 변경하고, `collector/collector_config.json`의 관리자 비밀번호도 변경한 값으로 맞춘 뒤 `start_collector.bat`를 실행합니다.
+
+---
+
+## v1.0.4 배차 대량저장 및 TAGO 설정 보완
+
+### 기존 Supabase 프로젝트 업그레이드
+1. Supabase > SQL Editor에서 `sql/04_dispatch_import_timeout_fix.sql` 전체 실행
+2. 웹앱 v1.0.4를 GitHub/Netlify에 배포
+3. 브라우저에서 Ctrl+F5 후 배차표 2종을 다시 업로드
+
+v1.0.4는 배차표 두 형식의 동일 배차를 먼저 병합하고, 최대 100건 단위로 분할 저장합니다.
+DB 함수도 행마다 초기비밀번호 해시를 만들던 방식을 제거하고 1회 생성 + 집합처리 방식으로 변경했습니다.
+업로드가 끝나면 등록 배차 조회일을 업로드 자료의 운행일자로 자동 변경합니다.
+
+### TAGO(BIS) 서비스키
+창원시 자체 API 키가 아닙니다. 공공데이터포털에서 아래 2개 API를 활용신청합니다.
+- 국토교통부_(TAGO)_버스노선정보 : 데이터셋 15098529
+- 국토교통부_(TAGO)_버스위치정보 : 데이터셋 15098533
+
+활용신청 때 동일한 프로젝트 서비스키 또는 개인 서비스키를 선택하고, 승인 후 발급된 서비스키를
+`collector_config.json`의 `tago_service_key`에 입력합니다.
+Collector는 이 키로 도시코드/노선ID를 찾은 뒤 노선별 실시간 버스 위치를 조회합니다.
+전체 BIS 위치이력은 Supabase에 저장하지 않고, 배차 예정차량과 비교해 확정된 차량변경 이벤트만 저장합니다.
+
+TAGO 키가 아직 없으면 다음처럼 BIS만 끄고 CDT 수집을 먼저 운용할 수 있습니다.
+```
+"enable_bis": false,
+"enable_taco": true,
+"tago_service_key": ""
+```

@@ -107,12 +107,49 @@
     const dz=$('#dispatchDrop'); ['dragenter','dragover'].forEach(e=>dz.addEventListener(e,x=>{x.preventDefault();dz.classList.add('drag')})); ['dragleave','drop'].forEach(e=>dz.addEventListener(e,x=>{x.preventDefault();dz.classList.remove('drag')})); dz.addEventListener('drop',e=>handleDispatchFiles([...e.dataTransfer.files]));
     $('#loadDispatch').onclick=loadDispatchList; loadDispatchList();
   }
+  function mergeDispatchRows(rows){
+    const m=new Map();
+    for(const r of rows){
+      const key=[r.service_date,r.vehicle_no,r.driver_name,r.shift_type].join('|');
+      const a=m.get(key);
+      if(!a){ m.set(key,{...r}); continue; }
+      if(!a.shift_start && r.shift_start) a.shift_start=r.shift_start;
+      if(!a.shift_end && r.shift_end) a.shift_end=r.shift_end;
+      if((!a.route_no || a.route_no==='-1') && r.route_no) a.route_no=r.route_no;
+      if((!a.run_order || a.run_order<1) && Number(r.run_order)>0) a.run_order=Number(r.run_order);
+      if(!a.support_route_no && r.support_route_no) a.support_route_no=r.support_route_no;
+      if((a.support_run_order===null || a.support_run_order===undefined) && Number(r.support_run_order)>0) a.support_run_order=Number(r.support_run_order);
+      if(a.source_format!==r.source_format) a.source_format='MERGED';
+    }
+    return [...m.values()];
+  }
   async function handleDispatchFiles(files){
     if(typeof XLSX==='undefined') return toast('SheetJS를 불러오지 못했습니다. 인터넷 연결을 확인하세요.',true);
     let all=[]; for(const f of files){ const rows=await readSheet(f); const norm=normalizeDispatch(rows,f.name); all.push(...norm); }
     if(!all.length) return toast('인식 가능한 배차 데이터가 없습니다.',true);
-    $('#dispatchPreview').innerHTML=`<div class="notice">${files.length}개 파일에서 ${all.length}건을 인식했습니다.</div><div class="table-wrap"><table><thead><tr><th>일자</th><th>차량</th><th>기사</th><th>구분</th><th>노선</th><th>순번</th><th>시작</th><th>종료</th></tr></thead><tbody>${all.slice(0,30).map(r=>`<tr><td>${r.service_date}</td><td>${esc(r.vehicle_no)}</td><td>${esc(r.driver_name)}</td><td>${r.shift_type}</td><td>${esc(r.route_no)}</td><td>${r.run_order||''}</td><td>${r.shift_start?fmtDT(r.shift_start):'-'}</td><td>${r.shift_end?fmtDT(r.shift_end):'-'}</td></tr>`).join('')}</tbody></table></div><button id="saveDispatch" class="btn primary" style="margin-top:12px">Supabase에 ${all.length}건 저장</button>`;
-    $('#saveDispatch').onclick=async()=>{ try{ const d=await rpc('admin_import_dispatch',{p_token:token(),p_rows:all,p_source_file:files.map(f=>f.name).join(', ')}); toast(`${d.rows}건 저장했습니다.`); loadDispatchList(); }catch(e){toast(e.message,true);} };
+    const merged=mergeDispatchRows(all);
+    const mergedMsg=all.length===merged.length?`${merged.length}건`:`원본 ${all.length}건 → 중복/보완 병합 ${merged.length}건`;
+    $('#dispatchPreview').innerHTML=`<div class="notice">${files.length}개 파일에서 ${mergedMsg}을 저장 대상으로 인식했습니다.</div><div class="table-wrap"><table><thead><tr><th>일자</th><th>차량</th><th>기사</th><th>구분</th><th>노선</th><th>순번</th><th>시작</th><th>종료</th></tr></thead><tbody>${merged.slice(0,30).map(r=>`<tr><td>${r.service_date}</td><td>${esc(r.vehicle_no)}</td><td>${esc(r.driver_name)}</td><td>${r.shift_type}</td><td>${esc(r.route_no)}</td><td>${r.run_order||''}</td><td>${r.shift_start?fmtDT(r.shift_start):'-'}</td><td>${r.shift_end?fmtDT(r.shift_end):'-'}</td></tr>`).join('')}</tbody></table></div><button id="saveDispatch" class="btn primary" style="margin-top:12px">Supabase에 ${merged.length}건 저장</button>`;
+    $('#saveDispatch').onclick=async()=>{
+      const btn=$('#saveDispatch'); const source=files.map(f=>f.name).join(', '); const batchSize=100;
+      let saved=0;
+      try{
+        btn.disabled=true;
+        for(let i=0;i<merged.length;i+=batchSize){
+          const part=merged.slice(i,i+batchSize);
+          btn.textContent=`저장 중 ${Math.min(i+part.length,merged.length)}/${merged.length}`;
+          const d=await rpc('admin_import_dispatch',{p_token:token(),p_rows:part,p_source_file:`${source} [${Math.floor(i/batchSize)+1}/${Math.ceil(merged.length/batchSize)}]`});
+          saved+=Number(d?.rows||0);
+        }
+        toast(`${saved}건 저장했습니다.`);
+        if(merged[0]?.service_date && $('#dispatchDate')) $('#dispatchDate').value=merged[0].service_date;
+        btn.textContent=`저장 완료 ${saved}건`;
+        await loadDispatchList();
+      }catch(e){
+        btn.disabled=false; btn.textContent=`다시 저장 (${saved}/${merged.length} 처리)`;
+        toast(`${saved}건 처리 후 오류: ${e.message}`,true);
+      }
+    };
   }
   function excelTimeToHHMM(v){ if(v===null||v===undefined||v==='')return null; if(typeof v==='number'){ const min=Math.round((v%1)*1440); return `${String(Math.floor(min/60)%24).padStart(2,'0')}:${String(min%60).padStart(2,'0')}`; } const s=String(v).trim(); if(/^\d{1,2}:\d{2}/.test(s))return s.slice(0,5); return null; }
   function normalizeDate(v){ if(v===null||v===undefined||v==='')return null; const s=String(v).trim(); if(/^\d{8}$/.test(s))return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`; if(/^\d{4}-\d{2}-\d{2}/.test(s))return s.slice(0,10); if(typeof v==='number'&&v>30000){ const d=XLSX.SSF.parse_date_code(v); return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`; } return null; }
