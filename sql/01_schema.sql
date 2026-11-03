@@ -3,6 +3,19 @@
 create schema if not exists extensions;
 create extension if not exists pgcrypto with schema extensions;
 
+-- Supabase project may already have pgcrypto enabled in another schema.
+-- pgcrypto is relocatable, so normalize it to extensions for stable RPC calls.
+do $$
+declare v_pgcrypto_schema text;
+begin
+  select n.nspname into v_pgcrypto_schema
+  from pg_extension e join pg_namespace n on n.oid=e.extnamespace
+  where e.extname='pgcrypto';
+  if v_pgcrypto_schema is not null and v_pgcrypto_schema <> 'extensions' then
+    execute 'alter extension pgcrypto set schema extensions';
+  end if;
+end $$;
+
 create table if not exists public.app_users (
   id uuid primary key default gen_random_uuid(),
   login_id text not null unique,
@@ -227,7 +240,7 @@ alter table public.risk_rules enable row level security;
 
 -- 초기 관리자: 로그인 ID '관리자' / 초기 비밀번호 '1111' / 첫 로그인 후 변경 필수
 insert into public.app_users(login_id,display_name,role,password_hash,must_change_password)
-values ('관리자','관리자','admin',crypt('1111',gen_salt('bf',10)),true)
+values ('관리자','관리자','admin',extensions.crypt('1111',extensions.gen_salt('bf',10)),true)
 on conflict(login_id) do nothing;
 
 create or replace function public._session_user_id(p_token text)
@@ -263,7 +276,7 @@ returns jsonb language plpgsql security definer set search_path=public,extension
 declare v_u public.app_users; v_token uuid;
 begin
   select * into v_u from public.app_users where login_id=trim(p_login_id) and active=true;
-  if v_u.id is null or crypt(p_password,v_u.password_hash)<>v_u.password_hash then
+  if v_u.id is null or extensions.crypt(p_password,v_u.password_hash)<>v_u.password_hash then
     raise exception '아이디 또는 비밀번호가 올바르지 않습니다.';
   end if;
   delete from public.app_sessions where expires_at<=now();
@@ -289,8 +302,8 @@ begin
   v_uid:=public._session_user_id(p_token); if v_uid is null then raise exception '세션이 만료되었습니다.'; end if;
   if length(p_new_password)<6 or p_new_password='1111' then raise exception '새 비밀번호는 6자 이상이며 1111과 달라야 합니다.'; end if;
   select password_hash into v_hash from public.app_users where id=v_uid;
-  if crypt(p_old_password,v_hash)<>v_hash then raise exception '현재 비밀번호가 올바르지 않습니다.'; end if;
-  update public.app_users set password_hash=crypt(p_new_password,gen_salt('bf',10)),must_change_password=false,updated_at=now() where id=v_uid;
+  if extensions.crypt(p_old_password,v_hash)<>v_hash then raise exception '현재 비밀번호가 올바르지 않습니다.'; end if;
+  update public.app_users set password_hash=extensions.crypt(p_new_password,extensions.gen_salt('bf',10)),must_change_password=false,updated_at=now() where id=v_uid;
   perform public._audit(v_uid,'PASSWORD_CHANGE','app_user',v_uid::text);
   return jsonb_build_object('ok',true);
 end $$;
@@ -313,7 +326,7 @@ begin
   for r in select * from jsonb_array_elements(coalesce(p_rows,'[]'::jsonb)) loop
     if coalesce(r->>'driver_name','')='' or coalesce(r->>'vehicle_no','')='' then continue; end if;
     insert into public.app_users(login_id,display_name,role,password_hash,must_change_password)
-    values(trim(r->>'driver_name'),trim(r->>'driver_name'),'driver',crypt('1111',gen_salt('bf',10)),true)
+    values(trim(r->>'driver_name'),trim(r->>'driver_name'),'driver',extensions.crypt('1111',extensions.gen_salt('bf',10)),true)
     on conflict(login_id) do nothing;
     select id into v_driver from public.app_users where login_id=trim(r->>'driver_name');
     v_date=(r->>'service_date')::date;
@@ -345,7 +358,7 @@ begin
   v_admin:=public._require_admin(p_token);
   if coalesce(p_report->>'driver_name','')='' then raise exception '운전자 이름이 없습니다.'; end if;
   insert into public.app_users(login_id,display_name,role,password_hash,must_change_password)
-  values(trim(p_report->>'driver_name'),trim(p_report->>'driver_name'),'driver',crypt('1111',gen_salt('bf',10)),true)
+  values(trim(p_report->>'driver_name'),trim(p_report->>'driver_name'),'driver',extensions.crypt('1111',extensions.gen_salt('bf',10)),true)
   on conflict(login_id) do nothing;
   select id into v_driver from public.app_users where login_id=trim(p_report->>'driver_name');
   v_month=(p_report->>'analysis_month')::date;
@@ -514,7 +527,7 @@ returns jsonb language plpgsql security definer set search_path=public,extension
 declare v_admin uuid;
 begin
   v_admin:=public._require_admin(p_token);
-  update public.app_users set password_hash=crypt('1111',gen_salt('bf',10)),must_change_password=true,updated_at=now() where id=p_user_id;
+  update public.app_users set password_hash=extensions.crypt('1111',extensions.gen_salt('bf',10)),must_change_password=true,updated_at=now() where id=p_user_id;
   delete from public.app_sessions where user_id=p_user_id;
   perform public._audit(v_admin,'RESET_PASSWORD','app_user',p_user_id::text);
   return jsonb_build_object('ok',true);

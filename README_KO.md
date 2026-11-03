@@ -390,3 +390,9 @@ Supabase의 `pgcrypto` 확장 기능은 보통 `extensions` 스키마에 설치�
 4. 웹앱을 새로고침하고 다시 로그인합니다.
 
 v1.0.1의 `sql/01_schema.sql`에는 이 수정이 이미 반영되어 있습니다.
+
+
+## v1.0.3 로그인 crypt() 오류 복구
+웹 로그인 또는 Collector에서 `function crypt(text, text) does not exist`가 표시되면, Supabase SQL Editor에서 `sql/03_pgcrypto_full_repair.sql` 전체를 한 번 실행하세요. 이 복구 SQL은 pgcrypto를 `extensions` 스키마로 정규화하고 로그인/비밀번호 변경/기사계정 생성 RPC에서 `extensions.crypt()`와 `extensions.gen_salt()`를 명시적으로 사용하도록 재생성합니다. 기존 운행 데이터는 삭제하지 않습니다.
+
+복구 후 웹에서 `관리자 / 1111`로 로그인하여 첫 비밀번호를 변경하고, `collector/collector_config.json`의 관리자 비밀번호도 변경한 값으로 맞춘 뒤 `start_collector.bat`를 실행합니다.
