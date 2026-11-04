@@ -2,32 +2,35 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#0f3557" />
-  <title>대운교통 SafeDrive</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#0b2f50" />
+  <title>대운교통 SafeDrive AI</title>
   <link rel="stylesheet" href="assets/app.css" />
 </head>
 <body>
   <div id="toast" class="toast"></div>
+
   <main id="setupView" class="center-page hidden">
     <section class="auth-card wide-card">
+      <div class="brand-kicker">AI TRANSPORT INTELLIGENCE</div>
       <div class="brand-mark">D</div>
-      <h1>대운교통 SafeDrive</h1>
+      <h1>대운교통 SafeDrive AI</h1>
       <p class="muted">Supabase 연결정보를 처음 한 번 설정합니다.</p>
       <label>Supabase URL<input id="setupUrl" placeholder="https://xxxx.supabase.co"></label>
       <label>Publishable / anon key<textarea id="setupKey" rows="4" placeholder="eyJ..."></textarea></label>
-      <button id="saveSetupBtn" class="btn primary">연결정보 저장</button>
-      <p class="small muted">브라우저에 저장되는 값은 공개용 anon/publishable key만 사용하세요. service_role key는 입력하지 마십시오.</p>
+      <button id="saveSetupBtn" class="btn primary full">연결정보 저장</button>
+      <p class="small muted">브라우저에는 공개용 anon/publishable key만 입력하십시오. service_role key는 사용하지 않습니다.</p>
     </section>
   </main>
 
   <main id="loginView" class="center-page hidden">
     <section class="auth-card">
+      <div class="brand-kicker">AI TRANSPORT INTELLIGENCE</div>
       <div class="brand-mark">D</div>
       <h1>대운교통 SafeDrive</h1>
-      <p class="muted">기사 본인은 이름으로 로그인합니다.</p>
-      <label>로그인 ID<input id="loginId" autocomplete="username" placeholder="예: 강명구B"></label>
-      <label>비밀번호<input id="loginPw" type="password" autocomplete="current-password" placeholder="초기 비밀번호 1111"></label>
+      <p class="muted">배차·CDT·BIS·eTAS 통합 안전운행 관리</p>
+      <label>로그인 ID<input id="loginId" autocomplete="username" placeholder="기사: 본인 이름 / 관리자: 관리자"></label>
+      <label>비밀번호<input id="loginPw" type="password" autocomplete="current-password" placeholder="기사 초기 비밀번호 1111"></label>
       <button id="loginBtn" class="btn primary full">로그인</button>
       <div class="login-help">기사 초기 비밀번호 <b>1111</b> · 첫 로그인 후 반드시 변경</div>
       <button id="openSetupBtn" class="btn text-btn">Supabase 연결 설정</button>
@@ -36,7 +39,7 @@
 
   <div id="appView" class="app-shell hidden">
     <aside class="sidebar">
-      <div class="side-brand"><span class="mini-logo">D</span><div><b>SafeDrive</b><small>대운교통(주)</small></div></div>
+      <div class="side-brand"><span class="mini-logo">D</span><div><b>SafeDrive AI</b><small>대운교통(주)</small></div></div>
       <nav id="nav"></nav>
       <div class="side-bottom">
         <div id="userBox" class="user-box"></div>
@@ -55,7 +58,6 @@
 
   <div id="modal" class="modal hidden"><div class="modal-card"><button id="modalClose" class="modal-close">×</button><div id="modalBody"></div></div></div>
 
-  <script src="config.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script src="assets/app.js"></script>
 </body>

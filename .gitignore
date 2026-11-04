@@ -1,4 +1,9 @@
-collector/collector_config.json
-collector/collector_state.json
+*.xls
+*.xlsx
 .DS_Store
 Thumbs.db
+collector/collector.pid
+collector/collector.stop
+collector/collector_config.json
+collector/collector_state.json
+collector/collector_status.json
