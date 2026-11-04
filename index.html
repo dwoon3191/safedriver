@@ -15,11 +15,11 @@
       <div class="brand-kicker">AI TRANSPORT INTELLIGENCE</div>
       <div class="brand-mark">D</div>
       <h1>대운교통 SafeDrive AI</h1>
-      <p class="muted">Supabase 연결정보를 처음 한 번 설정합니다.</p>
+      <p class="muted">관리자 설치 단계에서 Supabase 연결정보를 처음 한 번 설정합니다.</p>
       <label>Supabase URL<input id="setupUrl" placeholder="https://xxxx.supabase.co"></label>
       <label>Publishable / anon key<textarea id="setupKey" rows="4" placeholder="eyJ..."></textarea></label>
       <button id="saveSetupBtn" class="btn primary full">연결정보 저장</button>
-      <p class="small muted">브라우저에는 공개용 anon/publishable key만 입력하십시오. service_role key는 사용하지 않습니다.</p>
+      <p class="small muted">관리자만 설정합니다. 기사 계정은 배포된 config.js를 통해 별도 URL·키 입력 없이 로그인합니다. service_role key는 사용하지 않습니다.</p>
     </section>
   </main>
 
@@ -28,12 +28,11 @@
       <div class="brand-kicker">AI TRANSPORT INTELLIGENCE</div>
       <div class="brand-mark">D</div>
       <h1>대운교통 SafeDrive</h1>
-      <p class="muted">배차·CDT·BIS·eTAS 통합 안전운행 관리</p>
+      <p class="muted">배차·운행시간표·BIS·CDT 기반 기사 운행분석</p>
       <label>로그인 ID<input id="loginId" autocomplete="username" placeholder="기사: 본인 이름 / 관리자: 관리자"></label>
       <label>비밀번호<input id="loginPw" type="password" autocomplete="current-password" placeholder="기사 초기 비밀번호 1111"></label>
       <button id="loginBtn" class="btn primary full">로그인</button>
       <div class="login-help">기사 초기 비밀번호 <b>1111</b> · 첫 로그인 후 반드시 변경</div>
-      <button id="openSetupBtn" class="btn text-btn">Supabase 연결 설정</button>
     </section>
   </main>
 
@@ -58,6 +57,7 @@
 
   <div id="modal" class="modal hidden"><div class="modal-card"><button id="modalClose" class="modal-close">×</button><div id="modalBody"></div></div></div>
 
+  <script src="config.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script src="assets/app.js"></script>
 </body>

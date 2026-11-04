@@ -33,7 +33,7 @@ if errorlevel 1 goto config_error
 echo.
 echo Opening collector_config.json in Notepad.
 echo Required: Supabase URL/key, web admin password, TAGO key.
-echo eTAS reports are auto-imported when downloaded into etas_folder.
+echo Existing collector_config.json and collector_state.json are preserved.
 start "" notepad.exe "collector_config.json"
 echo.
 echo 1. Save collector_config.json.

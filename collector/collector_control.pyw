@@ -106,7 +106,7 @@ class ControlCenter(tk.Tk):
                 'heartbeat',
                 'taco',
                 'bis',
-                'etas',
+                'pending',
                 'success',
                 'error',
                 'counts',
@@ -127,7 +127,7 @@ class ControlCenter(tk.Tk):
         ).pack(anchor='w', padx=24, pady=(18, 0))
         tk.Label(
             header,
-            text='CDT · eTAS · TAGO/BIS 백그라운드 수집 상태와 시작·종료 관리',
+            text='CDT · TAGO/BIS 백그라운드 수집과 지연수집 매칭 상태 관리',
             font=('Malgun Gothic', 10),
             fg='#c9e5f7',
             bg='#0e3558',
@@ -144,7 +144,7 @@ class ControlCenter(tk.Tk):
             ('마지막 Heartbeat', 'heartbeat'),
             ('CDT 마지막 검색', 'taco'),
             ('BIS 마지막 조회', 'bis'),
-            ('eTAS 마지막 검색', 'etas'),
+            ('CDT 매칭 대기', 'pending'),
             ('마지막 정상처리', 'success'),
             ('수집 건수', 'counts'),
             ('최근 오류', 'error'),
@@ -201,8 +201,8 @@ class ControlCenter(tk.Tk):
 
         info = (
             '이 제어창을 닫아도 Collector는 Windows 예약작업에서 계속 실행됩니다.\n'
-            'eTAS 자동수집은 eTAS 보고서를 설정 폴더에 내려받았을 때 작동하며, '
-            'CDT는 ADTviewer Data 폴더에서 자동 수집됩니다.'
+            'CDT는 차량 입고 또는 수리 후 며칠 뒤 생성되어도 실제 운행일 기준으로 다시 매칭합니다. '
+            '설정파일과 처리상태는 시작·종료·재설치 과정에서 자동 초기화되지 않습니다.'
         )
         tk.Label(
             body,
@@ -266,13 +266,13 @@ class ControlCenter(tk.Tk):
         self.status_vars['heartbeat'].set(heartbeat or '-')
         self.status_vars['taco'].set(status.get('last_taco_scan_at') or '-')
         self.status_vars['bis'].set(status.get('last_bis_poll_at') or '-')
-        self.status_vars['etas'].set(status.get('last_etas_scan_at') or '-')
+        self.status_vars['pending'].set(f"{(status.get('counters') or {}).get('pending_cdt',0)}건")
         self.status_vars['success'].set(status.get('last_success_at') or '-')
         counters = status.get('counters') or {}
         self.status_vars['counts'].set(
-            f"CDT {counters.get('taco_files',0)}파일 / 이벤트 {counters.get('taco_events',0)}건 / "
-            f"eTAS {counters.get('etas_files',0)}파일 / BIS 조회 {counters.get('bis_polls',0)}회 / "
-            f"변경 {counters.get('bis_changes',0)}건"
+            f"CDT {counters.get('taco_files',0)}파일 / 대표이벤트 {counters.get('taco_events',0)}건 / "
+            f"매칭대기 {counters.get('pending_cdt',0)}건 / BIS 조회 {counters.get('bis_polls',0)}회 / "
+            f"실제차량 연결 {counters.get('bis_changes',0)}건"
         )
         self.status_vars['error'].set(status.get('last_error') or '없음')
         self.after(2000, self.refresh)

@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = 'DaewoonCollector-1.1.0'
+VERSION = 'DaewoonCollector-1.2.0'
 KST = timezone(timedelta(hours=9))
 DTG_EPOCH = datetime(2000, 1, 1)
 RECORD_SIZE = 128
@@ -42,9 +42,7 @@ DEFAULT_CONFIG = {
     'agent_id': '',
     'web_url': 'https://dwoondriver.netlify.app',
     'taco_folder': r'E:\Choyoung\ADTviewer\Data',
-    'etas_folder': r'E:\Choyoung\ADTviewer\eTAS',
     'scan_seconds': 5,
-    'etas_scan_seconds': 20,
     'stable_seconds': 8,
     'heartbeat_seconds': 15,
     'tago_service_key': '',
@@ -54,9 +52,17 @@ DEFAULT_CONFIG = {
     'bis_confirm_polls': 2,
     'bis_recent_minutes': 12,
     'speed_watch_kmh': 80,
+    'analysis_folder': r'E:\Choyoung\ADTviewer\SafeDriveAnalysis',
+    'pending_retry_minutes': 60,
+    'pending_retention_days': 180,
+    'final_match_ratio': 0.90,
+    'max_event_samples_per_type': 3,
+    'bis_trip_window_minutes': 150,
+    'event_retention_days': 90,
+    'activity_retention_days': 30,
+    'audit_retention_days': 180,
     'enable_bis': True,
     'enable_taco': True,
-    'enable_etas_auto': True,
 }
 
 _RUNTIME = {
@@ -69,15 +75,14 @@ _RUNTIME = {
     'last_heartbeat_at': '',
     'last_taco_scan_at': '',
     'last_bis_poll_at': '',
-    'last_etas_scan_at': '',
     'last_success_at': '',
     'last_error': '',
     'counters': {
         'taco_files': 0,
         'taco_events': 0,
-        'etas_files': 0,
         'bis_polls': 0,
         'bis_changes': 0,
+        'pending_cdt': 0,
         'errors': 0,
     },
     'config_summary': {},
@@ -232,6 +237,25 @@ class Supabase:
             {'p_token': self.token, 'p_service_date': service_date.isoformat()},
         ) or []
 
+    def context(self, service_date: date):
+        return self.rpc(
+            'collector_get_context',
+            {'p_token': self.token, 'p_service_date': service_date.isoformat()},
+            timeout=60,
+        ) or {'dispatch': [], 'bindings': [], 'timetable': [], 'day_type': ''}
+
+    def cleanup_storage(self):
+        return self.rpc(
+            'collector_cleanup_minimal_storage',
+            {
+                'p_token': self.token,
+                'p_event_days': int(self.cfg.get('event_retention_days', 90)),
+                'p_activity_days': int(self.cfg.get('activity_retention_days', 30)),
+                'p_audit_days': int(self.cfg.get('audit_retention_days', 180)),
+            },
+            timeout=60,
+        )
+
     def ingest_changes(self, rows):
         return self.rpc(
             'collector_ingest_vehicle_changes',
@@ -248,13 +272,6 @@ class Supabase:
                 'p_summaries': summaries,
             },
             timeout=120,
-        )
-
-    def import_etas(self, report):
-        return self.rpc(
-            'admin_import_etas',
-            {'p_token': self.token, 'p_report': report},
-            timeout=90,
         )
 
     def heartbeat(self, payload):
@@ -421,69 +438,216 @@ def group_contiguous_events(hits):
     return sorted(output, key=lambda item: item['recorded_at'])
 
 
-def resolve_assignment(recorded_at, vehicle, dispatch, changes):
+
+def schedule_dt(service_date_value, departure_time):
+    if not departure_time:
+        return None
+    try:
+        text = str(departure_time)
+        hh, mm, *rest = [int(part) for part in text.split(':')]
+        ss = rest[0] if rest else 0
+        return datetime(
+            service_date_value.year,
+            service_date_value.month,
+            service_date_value.day,
+            hh,
+            mm,
+            ss,
+            tzinfo=KST,
+        )
+    except Exception:
+        return None
+
+
+def active_dispatch_rows(rows, timetable=None, current_time=None, trip_window_minutes=150):
+    current_time = current_time or datetime.now(KST)
+    timetable = timetable or []
+    output = []
+    schedule_map = defaultdict(list)
+    for slot in timetable:
+        route = str(slot.get('route_no') or '').strip()
+        order = int(slot.get('run_order') or -1)
+        dt_value = schedule_dt(current_time.date(), slot.get('departure_time'))
+        if route and order > 0 and dt_value:
+            schedule_map[(route, order)].append(dt_value)
+
+    for assignment in rows:
+        start = parse_dt(assignment.get('shift_start'))
+        end = parse_dt(assignment.get('shift_end'))
+        if start and end and not (start <= current_time <= end):
+            continue
+        if not start or not end:
+            shift_type = str(assignment.get('shift_type') or '').upper()
+            if shift_type == 'AM' and current_time.hour >= 14:
+                continue
+            if shift_type == 'PM' and current_time.hour < 10:
+                continue
+
+        route = str(assignment.get('route_no') or '').strip()
+        order = int(assignment.get('run_order') or -1)
+        slots = schedule_map.get((route, order), [])
+        if slots:
+            recent = [
+                dt_value
+                for dt_value in slots
+                if 0 <= (current_time - dt_value).total_seconds() <= trip_window_minutes * 60
+            ]
+            upcoming = [
+                dt_value
+                for dt_value in slots
+                if 0 < (dt_value - current_time).total_seconds() <= 20 * 60
+            ]
+            selected = max(recent) if recent else (min(upcoming) if upcoming else None)
+            if selected is None:
+                continue
+            assignment = dict(assignment)
+            assignment['_scheduled_departure'] = selected.isoformat()
+        output.append(assignment)
+    return output
+
+
+def resolve_assignment(recorded_at, vehicle, dispatch, bindings):
     current = recorded_at.replace(tzinfo=KST)
+    vehicle_norm = normalize_vehicle(vehicle)
+
     direct = []
     for assignment in dispatch:
-        if normalize_vehicle(assignment.get('vehicle_no')) != normalize_vehicle(vehicle):
+        if normalize_vehicle(assignment.get('vehicle_no')) != vehicle_norm:
             continue
         start = parse_dt(assignment.get('shift_start'))
         end = parse_dt(assignment.get('shift_end'))
         if start and end and start <= current <= end:
             direct.append(assignment)
+        elif not start or not end:
+            shift_type = str(assignment.get('shift_type') or '').upper()
+            if (shift_type == 'AM' and current.hour < 14) or (
+                shift_type == 'PM' and current.hour >= 10
+            ) or shift_type not in ('AM', 'PM'):
+                direct.append(assignment)
     if direct:
-        return direct[0]
+        return sorted(
+            direct,
+            key=lambda item: (
+                0 if item.get('shift_start') else 1,
+                int(item.get('run_order') or 9999),
+            ),
+        )[0]
 
-    replacements = [
-        change
-        for change in changes
-        if normalize_vehicle(change.get('new_vehicle')) == normalize_vehicle(vehicle)
-        and parse_dt(change.get('detected_at'))
-        and parse_dt(change.get('detected_at')) <= current
-    ]
-    if replacements:
-        change = max(replacements, key=lambda item: parse_dt(item['detected_at']))
+    matched_bindings = []
+    for binding in bindings or []:
+        if normalize_vehicle(
+            binding.get('actual_vehicle') or binding.get('new_vehicle')
+        ) != vehicle_norm:
+            continue
+        valid_from = parse_dt(
+            binding.get('valid_from_at')
+            or binding.get('effective_from_at')
+            or binding.get('detected_at')
+        )
+        valid_to = parse_dt(binding.get('valid_to_at'))
+        if valid_from and current < valid_from:
+            continue
+        if valid_to and current > valid_to:
+            continue
+        matched_bindings.append(binding)
+
+    if matched_bindings:
+        binding = max(
+            matched_bindings,
+            key=lambda item: parse_dt(
+                item.get('valid_from_at')
+                or item.get('effective_from_at')
+                or item.get('detected_at')
+            )
+            or datetime.min.replace(tzinfo=KST),
+        )
         return {
-            'driver_name': change.get('driver_name', ''),
-            'route_no': change.get('route_no', ''),
-            'run_order': change.get('run_order', -1),
-            'vehicle_no': vehicle,
-            'shift_type': 'REPLACEMENT',
+            'driver_name': binding.get('driver_name', ''),
+            'route_no': binding.get('route_no', ''),
+            'run_order': int(binding.get('run_order') or -1),
+            'vehicle_no': vehicle_norm,
+            'planned_vehicle': binding.get('planned_vehicle')
+            or binding.get('old_vehicle'),
+            'shift_type': 'ACTUAL_VEHICLE',
         }
 
     candidates = [
         assignment
         for assignment in dispatch
-        if normalize_vehicle(assignment.get('vehicle_no')) == normalize_vehicle(vehicle)
+        if normalize_vehicle(assignment.get('vehicle_no')) == vehicle_norm
     ]
     if candidates:
-        shift_type = 'AM' if recorded_at.hour < 12 else 'PM'
-        shifted = [item for item in candidates if item.get('shift_type') == shift_type]
+        shift_type = 'AM' if current.hour < 14 else 'PM'
+        shifted = [
+            item
+            for item in candidates
+            if str(item.get('shift_type') or '').upper() == shift_type
+        ]
         return (shifted or candidates)[0]
     return None
 
 
-def active_dispatch_rows(rows, current_time=None):
-    current_time = current_time or datetime.now(KST)
-    output = []
-    for assignment in rows:
-        start = parse_dt(assignment.get('shift_start'))
-        end = parse_dt(assignment.get('shift_end'))
-        if start and end:
-            if start <= current_time <= end:
-                output.append(assignment)
-            continue
-        shift_type = str(assignment.get('shift_type') or '').upper()
-        if shift_type == 'AM' and current_time.hour < 12:
-            output.append(assignment)
-        elif shift_type == 'PM' and current_time.hour >= 12:
-            output.append(assignment)
-        elif shift_type not in ('AM', 'PM'):
-            output.append(assignment)
-    return output
+def build_safety_profile(values):
+    distance = max(float(values.get('distance_km') or 0), 1.0)
+    rates = {
+        key: float(values.get(key) or 0) * 100.0 / distance
+        for key in (
+            'rapid_start',
+            'rapid_accel',
+            'rapid_decel',
+            'rapid_stop',
+            'speed_watch',
+        )
+    }
+    penalty = (
+        rates['rapid_start'] * 0.8
+        + rates['rapid_accel'] * 0.8
+        + rates['rapid_decel'] * 1.2
+        + rates['rapid_stop'] * 1.6
+        + rates['speed_watch'] * 0.5
+    )
+    score = round(max(0.0, 100.0 - min(100.0, penalty)), 1)
+    if score >= 95:
+        level = '매우양호'
+    elif score >= 90:
+        level = '양호'
+    elif score >= 80:
+        level = '주의'
+    else:
+        level = '개선필요'
+
+    ranked = sorted(rates.items(), key=lambda item: item[1], reverse=True)
+    labels = {
+        'rapid_start': '급출발',
+        'rapid_accel': '급가속',
+        'rapid_decel': '급감속',
+        'rapid_stop': '급정지',
+        'speed_watch': '관리속도 초과',
+    }
+    top = [labels[key] for key, value in ranked if value > 0][:2]
+    if top:
+        analysis_text = (
+            f"운행거리 {float(values.get('distance_km') or 0):.1f}km 기준 "
+            f"{', '.join(top)} 패턴을 우선 점검할 필요가 있습니다."
+        )
+    else:
+        analysis_text = (
+            f"운행거리 {float(values.get('distance_km') or 0):.1f}km에서 "
+            '주요 위험운전 후보가 확인되지 않았습니다.'
+        )
+    recommendations = []
+    if rates['rapid_start'] or rates['rapid_accel']:
+        recommendations.append('출발·재가속 시 단계적으로 가속하여 승차감을 확보합니다.')
+    if rates['rapid_decel'] or rates['rapid_stop']:
+        recommendations.append('정류장·교차로 접근 전에 미리 감속하여 급제동을 줄입니다.')
+    if rates['speed_watch']:
+        recommendations.append('노선별 제한속도와 회사 관리속도를 준수합니다.')
+    if not recommendations:
+        recommendations.append('현재의 부드러운 운전패턴을 지속 유지합니다.')
+    return score, level, rates, analysis_text, recommendations
 
 
-def analyze_cdt(path, cfg, dispatch, changes):
+def analyze_cdt(path, cfg, context):
     file_path = Path(path)
     file_hash = sha256_file(file_path)
     records = []
@@ -501,6 +665,8 @@ def analyze_cdt(path, cfg, dispatch, changes):
 
     service_date = service_date_from_filename(file_path, records[0]['dt'])
     vehicle = normalize_vehicle(header['vehicle_no'] or extract_vehicle(file_path.name))
+    dispatch = context.get('dispatch') or []
+    bindings = context.get('bindings') or context.get('changes') or []
     hits = []
     summaries = defaultdict(
         lambda: {
@@ -513,19 +679,32 @@ def analyze_cdt(path, cfg, dispatch, changes):
             'speed_watch': 0,
             'valid_pair_count': 0,
             'gap_seconds': 0,
+            'matched_seconds': 0,
+            'unmatched_seconds': 0,
+            'event_samples': defaultdict(list),
+            'run_orders': set(),
         }
     )
+    total_matched = 0
+    total_unmatched = 0
     previous = None
+    previous_assignment = None
+
     for record in records:
-        assignment = resolve_assignment(record['dt'], vehicle, dispatch, changes)
+        assignment = resolve_assignment(record['dt'], vehicle, dispatch, bindings)
         driver_name = assignment.get('driver_name', '') if assignment else ''
         route_no = str(assignment.get('route_no', '')) if assignment else ''
-        run_order = assignment.get('run_order', -1) if assignment else -1
+        run_order = int(assignment.get('run_order') or -1) if assignment else -1
         key = (driver_name, route_no)
         if driver_name:
+            total_matched += 1
+            summaries[key]['matched_seconds'] += 1
+            summaries[key]['run_orders'].add(run_order)
             summaries[key]['distance_km'] += record['speed'] / 3600
-            summaries[key]['max_speed'] = max(summaries[key]['max_speed'], record['speed'])
-            if record['speed'] >= cfg.get('speed_watch_kmh', 80):
+            summaries[key]['max_speed'] = max(
+                summaries[key]['max_speed'], record['speed']
+            )
+            if record['speed'] >= int(cfg.get('speed_watch_kmh', 80)):
                 hits.append(
                     {
                         'event_type': 'speed_watch',
@@ -540,17 +719,25 @@ def analyze_cdt(path, cfg, dispatch, changes):
                         'run_order': run_order,
                         'evidence': {
                             'speed_kmh': record['speed'],
-                            'threshold_kmh': cfg.get('speed_watch_kmh', 80),
+                            'threshold_kmh': int(cfg.get('speed_watch_kmh', 80)),
                         },
                     }
                 )
+        else:
+            total_unmatched += 1
+
         if previous:
             gap = (record['dt'] - previous['dt']).total_seconds()
             if driver_name and gap > 1:
                 summaries[key]['gap_seconds'] += max(0, int(gap) - 1)
-            if gap == 1:
-                if driver_name:
-                    summaries[key]['valid_pair_count'] += 1
+            same_driver = (
+                driver_name
+                and previous_assignment
+                and previous_assignment.get('driver_name') == driver_name
+                and str(previous_assignment.get('route_no', '')) == route_no
+            )
+            if gap == 1 and same_driver:
+                summaries[key]['valid_pair_count'] += 1
                 delta = record['speed'] - previous['speed']
                 types = []
                 if previous['speed'] <= 5 and delta >= 8:
@@ -562,31 +749,53 @@ def analyze_cdt(path, cfg, dispatch, changes):
                 if record['speed'] <= 5 and delta <= -9:
                     types.append('rapid_stop')
                 for event_type in types:
-                    if driver_name:
-                        hits.append(
-                            {
-                                'event_type': event_type,
-                                'recorded_at': record['dt'],
-                                'speed_before': previous['speed'],
-                                'speed_after': record['speed'],
-                                'brake_on': record['brake'],
-                                'lat': record['lat'],
-                                'lon': record['lon'],
-                                'driver_name': driver_name,
-                                'route_no': route_no,
-                                'run_order': run_order,
-                                'evidence': {'delta_kmh': delta},
-                            }
-                        )
+                    hits.append(
+                        {
+                            'event_type': event_type,
+                            'recorded_at': record['dt'],
+                            'speed_before': previous['speed'],
+                            'speed_after': record['speed'],
+                            'brake_on': record['brake'],
+                            'lat': record['lat'],
+                            'lon': record['lon'],
+                            'driver_name': driver_name,
+                            'route_no': route_no,
+                            'run_order': run_order,
+                            'evidence': {'delta_kmh': delta},
+                        }
+                    )
         previous = record
+        previous_assignment = assignment
 
+    grouped = group_contiguous_events(hits)
     events = []
-    for event in group_contiguous_events(hits):
-        if event.get('driver_name'):
-            key = (event['driver_name'], str(event.get('route_no', '')))
-            if event['event_type'] in summaries[key]:
-                summaries[key][event['event_type']] += 1
+    max_samples = max(1, int(cfg.get('max_event_samples_per_type', 3)))
+    sample_counter = defaultdict(int)
+    for event in grouped:
+        key = (event['driver_name'], str(event.get('route_no', '')))
+        if event['event_type'] in summaries[key]:
+            summaries[key][event['event_type']] += 1
         timestamp = event['recorded_at'].replace(tzinfo=KST).isoformat()
+        sample = {
+            'event_type': event['event_type'],
+            'recorded_at': timestamp,
+            'speed_before': event['speed_before'],
+            'speed_after': event['speed_after'],
+            'brake_on': bool(event['brake_on']),
+            'latitude': event['lat'],
+            'longitude': event['lon'],
+            'run_order': event.get('run_order', -1),
+            'evidence': event.get('evidence', {}),
+        }
+        summaries[key]['event_samples'][event['event_type']].append(sample)
+        sample_key = (
+            event['driver_name'],
+            str(event.get('route_no', '')),
+            event['event_type'],
+        )
+        if sample_counter[sample_key] >= max_samples:
+            continue
+        sample_counter[sample_key] += 1
         event_key = hashlib.sha1(
             f"{vehicle}|{timestamp}|{event['event_type']}|{event.get('driver_name','')}|{event.get('route_no','')}".encode()
         ).hexdigest()
@@ -606,23 +815,46 @@ def analyze_cdt(path, cfg, dispatch, changes):
                 'brake_on': str(bool(event['brake_on'])).lower(),
                 'latitude': event['lat'] if event['lat'] is not None else '',
                 'longitude': event['lon'] if event['lon'] is not None else '',
-                'criteria_version': 'LOCAL-CANDIDATE-v1',
+                'criteria_version': 'SAFEDRIVE-CANDIDATE-v2',
                 'evidence': event['evidence'],
             }
         )
+
+    total_records = max(1, len(records))
+    match_ratio = total_matched / total_records
+    if total_matched == 0:
+        match_status = 'pending'
+    elif match_ratio >= float(cfg.get('final_match_ratio', 0.90)):
+        match_status = 'matched'
+    else:
+        match_status = 'partial'
+    late_days = max(0, (datetime.now(KST).date() - service_date).days)
 
     daily = []
     for (driver_name, route_no), values in summaries.items():
         if not driver_name:
             continue
         gap_seconds = values['gap_seconds']
-        quality = 'good' if gap_seconds < 300 else ('review' if gap_seconds < 1800 else 'limited')
+        quality = 'good' if gap_seconds < 300 else (
+            'review' if gap_seconds < 1800 else 'limited'
+        )
+        score, level, rates, analysis_text, recommendations = build_safety_profile(
+            values
+        )
+        samples = {
+            event_type: sample_rows[:max_samples]
+            for event_type, sample_rows in values['event_samples'].items()
+        }
         daily.append(
             {
                 'service_date': service_date.isoformat(),
                 'driver_name': driver_name,
                 'vehicle_no': vehicle,
                 'route_no': route_no,
+                'run_order': min(
+                    [value for value in values['run_orders'] if value > 0],
+                    default=-1,
+                ),
                 'distance_km': round(values['distance_km'], 3),
                 'max_speed': values['max_speed'],
                 'rapid_start': values['rapid_start'],
@@ -633,12 +865,22 @@ def analyze_cdt(path, cfg, dispatch, changes):
                 'valid_pair_count': values['valid_pair_count'],
                 'gap_seconds': gap_seconds,
                 'data_quality': quality,
+                'match_status': match_status,
+                'matched_seconds': values['matched_seconds'],
+                'unmatched_seconds': total_unmatched,
+                'late_days': late_days,
+                'safety_score': score,
+                'safety_level': level,
+                'event_rates': rates,
+                'event_samples': samples,
+                'analysis_text': analysis_text,
+                'recommendations': recommendations,
             }
         )
 
     import_info = {
         'source_file': file_path.name,
-        'source_path': str(file_path),
+        'source_path': '',
         'sha256': file_hash,
         'service_date': service_date.isoformat(),
         'vehicle_no': vehicle,
@@ -646,238 +888,37 @@ def analyze_cdt(path, cfg, dispatch, changes):
         'last_record_at': records[-1]['dt'].replace(tzinfo=KST).isoformat(),
         'record_count': len(records),
         'parser_version': VERSION,
+        'collected_at': now_iso(),
+        'delay_days': late_days,
+        'match_status': match_status,
+        'matched_seconds': total_matched,
+        'unmatched_seconds': total_unmatched,
+        'summary_only': True,
     }
     return import_info, events, daily
 
 
-# ---------- eTAS report auto import ----------
-def powershell_excel_to_json(input_path: Path) -> list[dict]:
-    """Read .xls/.xlsx through installed Microsoft Excel COM on Windows.
-
-    eTAS official reports are separate monthly Excel files. They are automatically
-    imported only after a downloaded file appears in the configured eTAS folder.
-    """
-    if os.name != 'nt':
-        raise RuntimeError('eTAS 자동 Excel 읽기는 Windows에서만 지원합니다.')
-
-    script = r'''
-param([string]$InputPath,[string]$OutputPath)
-$ErrorActionPreference = 'Stop'
-$excel = $null
-$book = $null
-try {
-  $excel = New-Object -ComObject Excel.Application
-  $excel.Visible = $false
-  $excel.DisplayAlerts = $false
-  $book = $excel.Workbooks.Open($InputPath, 0, $true)
-  $result = @()
-  foreach ($sheet in $book.Worksheets) {
-    $used = $sheet.UsedRange
-    $rows = @()
-    for ($r = 1; $r -le $used.Rows.Count; $r++) {
-      $row = @()
-      for ($c = 1; $c -le $used.Columns.Count; $c++) {
-        $v = $used.Cells.Item($r,$c).Value2
-        if ($null -eq $v) { $row += '' } else { $row += [string]$v }
-      }
-      $rows += ,$row
+def write_local_analysis(cfg, import_info, events, summaries):
+    root = Path(cfg.get('analysis_folder') or (BASE_DIR / 'analysis_archive'))
+    service_date = str(import_info.get('service_date') or 'unknown')
+    folder = root / service_date[:4] / service_date[5:7]
+    folder.mkdir(parents=True, exist_ok=True)
+    short_hash = str(import_info.get('sha256') or '')[:12]
+    vehicle = normalize_vehicle(import_info.get('vehicle_no'))
+    target = folder / f'{service_date}_{vehicle}_{short_hash}.json'
+    payload = {
+        'import': import_info,
+        'summaries': summaries,
+        'event_samples': events,
+        'note': '원본 CDT는 업로드하지 않으며 이 파일은 회사 PC의 로컬 분석 근거자료입니다.',
     }
-    $result += [pscustomobject]@{ name = [string]$sheet.Name; rows = $rows }
-  }
-  $result | ConvertTo-Json -Depth 12 -Compress | Set-Content -Encoding UTF8 $OutputPath
-}
-finally {
-  if ($null -ne $book) { $book.Close($false) | Out-Null }
-  if ($null -ne $excel) { $excel.Quit() }
-  if ($null -ne $book) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($book) }
-  if ($null -ne $excel) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel) }
-  [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-}
-'''
-    with tempfile.TemporaryDirectory(prefix='daewoon_etas_') as temp_dir:
-        temp = Path(temp_dir)
-        ps_path = temp / 'read_excel.ps1'
-        out_path = temp / 'workbook.json'
-        ps_path.write_text(script, encoding='utf-8-sig')
-        result = subprocess.run(
-            [
-                'powershell.exe',
-                '-NoProfile',
-                '-ExecutionPolicy',
-                'Bypass',
-                '-File',
-                str(ps_path),
-                str(input_path.resolve()),
-                str(out_path.resolve()),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-        )
-        if result.returncode != 0 or not out_path.exists():
-            raise RuntimeError(
-                'Microsoft Excel을 통한 eTAS 파일 읽기 실패: '
-                + (result.stderr.strip() or result.stdout.strip() or '원인 미상')
-            )
-        data = json.loads(out_path.read_text(encoding='utf-8-sig'))
-        return data if isinstance(data, list) else [data]
-
-
-def parse_float(value):
+    save_json(target, payload)
     try:
-        text = str(value or '').replace(',', '').strip()
-        return float(text) if text else None
+        return str(target.relative_to(root))
     except Exception:
-        return None
+        return target.name
 
 
-def parse_etas_rows(rows: list[list], source_file: str) -> dict:
-    flat = [str(cell or '') for row in rows for cell in row if str(cell or '').strip()]
-    driver = ''
-    level = ''
-    analysis_month = ''
-    summary = ''
-    weekday = ''
-    time_text = ''
-    trend = ''
-
-    for text in flat:
-        match = re.search(r'(.+?)님의 안전운전 수준은\s*["“]?([^"”]+)["”]?', text)
-        if match:
-            driver = match.group(1).strip()
-            level = match.group(2).replace('.', '').strip()
-        month_match = re.search(r'(20\d{2})년\s*(\d{1,2})월', text)
-        if month_match and not analysis_month:
-            analysis_month = f"{month_match.group(1)}-{int(month_match.group(2)):02d}-01"
-        if '안전운전수준은 업종평균대비' in text:
-            summary = re.sub(r'^⊙\s*', '', text)
-        if '위험운전행동은 특히' in text:
-            weekday = re.sub(r'^⊙\s*', '', text)
-            time_match = re.search(r'과\s*([^에]+)에 많이', text)
-            if time_match:
-                time_text = time_match.group(1).strip()
-        if '월간 추이는' in text:
-            trend = re.sub(r'^⊙\s*', '', text)
-
-    for row in rows:
-        for index, cell in enumerate(row):
-            if '분석기간' in str(cell):
-                for following in row[index + 1 :]:
-                    match = re.search(r'(20\d{2})년\s*(\d{1,2})월', str(following or ''))
-                    if match:
-                        analysis_month = f"{match.group(1)}-{int(match.group(2)):02d}-01"
-                        break
-
-    behaviors = []
-    header_row = -1
-    for row_index, row in enumerate(rows):
-        values = [str(cell or '').strip() for cell in row]
-        if any(value == '구분' for value in values) and any('과속' in value for value in values):
-            header_row = row_index
-            break
-
-    total_score = None
-    if header_row >= 0:
-        headers = []
-        current = ''
-        for cell in rows[header_row]:
-            value = re.sub(r'\s+', '', str(cell or ''))
-            if value:
-                current = value
-            headers.append(current)
-        if header_row + 1 < len(rows):
-            for column, cell in enumerate(rows[header_row + 1]):
-                sub = re.sub(r'\s+', '', str(cell or ''))
-                if sub and column < len(headers) and headers[column] == '급회전':
-                    headers[column] = f'급회전-{sub}'
-
-        data_rows = []
-        for row in rows[header_row + 2 : header_row + 12]:
-            label = ''
-            for cell in row:
-                value = str(cell or '').strip()
-                if re.fullmatch(r'20\d{2}-\d{2}월', value) or value == '증감':
-                    label = value
-                    break
-            if label:
-                data_rows.append((label, row))
-
-        current_row = None
-        if analysis_month:
-            key = analysis_month[:7]
-            current_row = next((item for item in data_rows if item[0].startswith(key)), None)
-        if current_row is None:
-            actual = [item for item in data_rows if item[0] != '증감']
-            current_row = actual[-1] if actual else None
-        previous_candidates = [
-            item for item in data_rows if item[0] != '증감' and item != current_row
-        ]
-        previous_row = previous_candidates[-1] if previous_candidates else None
-        change_row = next((item for item in data_rows if item[0] == '증감'), None)
-
-        if current_row:
-            seen = set()
-            for column, value in enumerate(current_row[1]):
-                header = headers[column] if column < len(headers) else ''
-                if not header or header in seen or header in ('합계', '구분'):
-                    continue
-                if str(value or '').strip() == '':
-                    continue
-                seen.add(header)
-                behaviors.append(
-                    {
-                        'behavior': header,
-                        'current_score': str(value),
-                        'previous_score': (
-                            str(previous_row[1][column])
-                            if previous_row and column < len(previous_row[1])
-                            else ''
-                        ),
-                        'change_score': (
-                            str(change_row[1][column])
-                            if change_row and column < len(change_row[1])
-                            else ''
-                        ),
-                        'grade': '',
-                    }
-                )
-            if '합계' in headers:
-                total_index = headers.index('합계')
-                if total_index < len(current_row[1]):
-                    total_score = parse_float(current_row[1][total_index])
-
-    recommendations = []
-    for row_index, row in enumerate(rows):
-        text = str(row[1] if len(row) > 1 else (row[0] if row else '')).strip()
-        if re.match(r'^\d+\.\s*["“]', text):
-            next_text = ''
-            if row_index + 1 < len(rows):
-                next_row = rows[row_index + 1]
-                next_text = str(
-                    next_row[1] if len(next_row) > 1 else (next_row[0] if next_row else '')
-                ).strip()
-            if next_text:
-                recommendations.append({'title': text, 'text': next_text})
-
-    if not driver:
-        raise ValueError('eTAS 리포트에서 운전자명을 찾지 못했습니다.')
-    if not analysis_month:
-        analysis_month = datetime.now(KST).strftime('%Y-%m-01')
-
-    return {
-        'driver_name': driver,
-        'analysis_month': analysis_month,
-        'safety_level': level,
-        'total_score': total_score,
-        'summary_text': summary,
-        'weekday_text': weekday,
-        'time_text': time_text,
-        'trend_text': trend,
-        'recommendations': recommendations,
-        'behaviors': behaviors,
-        'source_file': source_file,
-    }
 
 
 # ---------- TAGO BIS ----------
@@ -897,7 +938,7 @@ class Tago:
         )
         request = urllib.request.Request(
             url + '?' + query,
-            headers={'User-Agent': 'DaewoonSafeDrive/1.1'},
+            headers={'User-Agent': 'DaewoonSafeDrive/1.2'},
         )
         with urllib.request.urlopen(request, timeout=25) as response:
             data = json.loads(response.read().decode('utf-8', 'replace'))
@@ -1025,6 +1066,7 @@ def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
     for old_vehicle, new_vehicle in route_state.get('replacements', {}).items():
         if old_vehicle in expected:
             assignment = expected.pop(old_vehicle).copy()
+            assignment['_planned_vehicle'] = assignment.get('_planned_vehicle') or old_vehicle
             assignment['vehicle_no'] = new_vehicle
             expected[new_vehicle] = assignment
 
@@ -1036,10 +1078,11 @@ def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
     recent_minutes = int(cfg.get('bis_recent_minutes', 12))
     pairs = []
 
-    # 1) Best evidence: pair with the recently observed expected vehicle nearest by stop order.
+    # 1) Best evidence: globally pair recently observed expected vehicles with
+    # unexpected live vehicles by nearest stop order, without duplicate pairing.
+    recent_pairs = []
     for new_vehicle in unexpected:
         new_location = live_map[new_vehicle]
-        candidates = []
         for old_vehicle in missing:
             previous = last.get(old_vehicle)
             if not previous:
@@ -1053,29 +1096,49 @@ def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
                     int(previous.get('node_order', 0))
                     - int(new_location.get('node_order', 0))
                 )
-                candidates.append((distance, old_vehicle, 'high' if distance <= 3 else 'medium'))
-        if candidates:
-            distance, old_vehicle, confidence = min(candidates)
-            pairs.append((old_vehicle, new_vehicle, distance, confidence))
+                recent_pairs.append(
+                    (distance, old_vehicle, new_vehicle, 'high' if distance <= 3 else 'medium')
+                )
+    used_old = set()
+    used_new = set()
+    for distance, old_vehicle, new_vehicle, confidence in sorted(recent_pairs):
+        if old_vehicle in used_old or new_vehicle in used_new:
+            continue
+        pairs.append((old_vehicle, new_vehicle, distance, confidence))
+        used_old.add(old_vehicle)
+        used_new.add(new_vehicle)
 
-    # 2) Collector may start after a replacement. A persistent 1:1 mismatch is still usable.
-    if not pairs and len(unexpected) == 1 and len(missing) == 1:
-        pairs = [(missing[0], unexpected[0], 99, 'medium')]
+    remaining_missing = [v for v in missing if v not in used_old]
+    remaining_unexpected = [v for v in unexpected if v not in used_new]
 
-    # 3) Multiple persistent mismatches: low-confidence pairing by run order / current stop order.
-    if not pairs and 1 < len(unexpected) == len(missing) <= 4:
-        missing_sorted = sorted(
-            missing,
-            key=lambda vehicle: int(expected.get(vehicle, {}).get('run_order') or 9999),
-        )
+    # 2) Collector may start after a replacement. A persistent 1:1 mismatch is usable.
+    if len(remaining_unexpected) == 1 and len(remaining_missing) == 1:
+        pairs.append((remaining_missing[0], remaining_unexpected[0], 99, 'medium'))
+        used_old.add(remaining_missing[0])
+        used_new.add(remaining_unexpected[0])
+        remaining_missing = []
+        remaining_unexpected = []
+
+    # 3) Multiple start substitutions: pair the earlier scheduled trip with the bus
+    # that has progressed farther along the route. This is retained as low confidence
+    # and requires repeated observations before becoming a binding.
+    if 1 < len(remaining_unexpected) == len(remaining_missing) <= 8:
+        def assignment_time(vehicle):
+            assignment = expected.get(vehicle, {})
+            return parse_dt(assignment.get('_scheduled_departure')) or parse_dt(
+                assignment.get('shift_start')
+            ) or datetime.max.replace(tzinfo=KST)
+
+        missing_sorted = sorted(remaining_missing, key=assignment_time)
         unexpected_sorted = sorted(
-            unexpected,
-            key=lambda vehicle: int(live_map[vehicle].get('node_order') or 9999),
+            remaining_unexpected,
+            key=lambda vehicle: int(live_map[vehicle].get('node_order') or -1),
+            reverse=True,
         )
-        pairs = [
+        pairs.extend(
             (old_vehicle, new_vehicle, 999, 'low')
             for old_vehicle, new_vehicle in zip(missing_sorted, unexpected_sorted)
-        ]
+        )
 
     observed_keys = set()
     results = []
@@ -1095,8 +1158,18 @@ def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
             assignment = original_expected.get(old_vehicle, expected.get(old_vehicle, {}))
             live = live_map[new_vehicle]
             detected_at = now.isoformat()
+            previous_old = last.get(old_vehicle)
+            change_type = 'MID_ROUTE' if previous_old else 'START_SUBSTITUTE'
+            scheduled = parse_dt(assignment.get('_scheduled_departure'))
+            shift_start = parse_dt(assignment.get('shift_start'))
+            effective_from = (
+                now
+                if change_type == 'MID_ROUTE'
+                else (scheduled or shift_start or now)
+            )
+            valid_to = parse_dt(assignment.get('shift_end'))
             change_key = hashlib.sha1(
-                f'{today_key}|{route}|{old_vehicle}|{new_vehicle}'.encode()
+                f'{today_key}|{route}|{assignment.get("run_order",-1)}|{old_vehicle}|{new_vehicle}'.encode()
             ).hexdigest()
             results.append(
                 {
@@ -1107,6 +1180,11 @@ def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
                     'driver_name': assignment.get('driver_name', ''),
                     'old_vehicle': old_vehicle,
                     'new_vehicle': new_vehicle,
+                    'planned_vehicle': assignment.get('_planned_vehicle') or old_vehicle,
+                    'actual_vehicle': new_vehicle,
+                    'change_type': change_type,
+                    'effective_from_at': effective_from.isoformat(),
+                    'valid_to_at': valid_to.isoformat() if valid_to else '',
                     'detected_at': detected_at,
                     'node_order': live.get('node_order', ''),
                     'latitude': live.get('lat', ''),
@@ -1118,6 +1196,7 @@ def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
                     'raw': {
                         'node_name': live.get('node_name'),
                         'distance_node_order': distance,
+                        'scheduled_departure': assignment.get('_scheduled_departure'),
                         'matching_method': (
                             'recent_node'
                             if distance != 99 and distance != 999
@@ -1165,8 +1244,11 @@ class Collector:
         self.sb = Supabase(cfg)
         self.state = load_json(
             STATE_PATH,
-            {'processed': {}, 'processed_etas': {}, 'bis_routes': {}},
+            {'processed': {}, 'pending_cdt': {}, 'bis_routes': {}, 'last_cleanup_date': ''},
         )
+        self.state.setdefault('processed', {})
+        self.state.setdefault('pending_cdt', {})
+        self.state.setdefault('bis_routes', {})
         self.stop_event = threading.Event()
         self.restart_requested = False
         self.tago = Tago(cfg)
@@ -1174,12 +1256,13 @@ class Collector:
         _RUNTIME['agent_id'] = self.agent_id
         _RUNTIME['config_summary'] = {
             'taco_folder': cfg.get('taco_folder'),
-            'etas_folder': cfg.get('etas_folder'),
+            'analysis_folder': cfg.get('analysis_folder'),
             'city_name': cfg.get('city_name'),
             'enable_taco': bool(cfg.get('enable_taco')),
             'enable_bis': bool(cfg.get('enable_bis')),
-            'enable_etas_auto': bool(cfg.get('enable_etas_auto')),
             'bis_poll_seconds': int(cfg.get('bis_poll_seconds', 30)),
+            'pending_retry_minutes': int(cfg.get('pending_retry_minutes', 60)),
+            'storage_mode': 'summary_only',
         }
 
     def remote_activity(self, category, message, level='info', detail=None):
@@ -1258,8 +1341,27 @@ class Collector:
         if self.stop_event.is_set():
             return
         _RUNTIME['status'] = 'running'
+        _RUNTIME['counters']['pending_cdt'] = len(self.state.get('pending_cdt', {}))
         log(f'{VERSION} 시작 / Agent={self.agent_id}')
-        self.remote_activity('SYSTEM', f'{VERSION} 시작', detail={'pid': os.getpid()})
+        self.remote_activity(
+            'SYSTEM',
+            f'{VERSION} 시작',
+            detail={
+                'pid': os.getpid(),
+                'storage_mode': 'summary_only',
+                'pending_cdt': len(self.state.get('pending_cdt', {})),
+            },
+        )
+
+        try:
+            today_key = datetime.now(KST).date().isoformat()
+            if self.state.get('last_cleanup_date') != today_key:
+                result = self.sb.cleanup_storage()
+                self.state['last_cleanup_date'] = today_key
+                save_json(STATE_PATH, self.state)
+                log(f'Supabase 최소저장 정리 완료: {result}')
+        except Exception as exc:
+            log(f'저장공간 정리 오류: {exc}', level='error')
 
         heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
         heartbeat_thread.start()
@@ -1274,11 +1376,6 @@ class Collector:
 
         if self.cfg.get('enable_taco'):
             thread = threading.Thread(target=self.taco_loop, daemon=True)
-            thread.start()
-            self.threads.append(thread)
-
-        if self.cfg.get('enable_etas_auto'):
-            thread = threading.Thread(target=self.etas_loop, daemon=True)
             thread.start()
             self.threads.append(thread)
 
@@ -1352,12 +1449,20 @@ class Collector:
         signature = f'{stat.st_size}:{int(stat.st_mtime)}'
         if self.state.setdefault('processed', {}).get(key) == signature:
             return
+
+        pending = self.state.setdefault('pending_cdt', {}).get(key)
+        if pending and pending.get('signature') == signature:
+            next_retry = parse_dt(pending.get('next_retry_at'))
+            if next_retry and datetime.now(KST) < next_retry:
+                return
+
         self.stop_event.wait(float(self.cfg.get('stable_seconds', 8)))
         if self.stop_event.is_set():
             return
         stat_after = path.stat()
         if stat_after.st_size != stat.st_size:
             return
+
         try:
             with path.open('rb') as fp:
                 read_header(fp)
@@ -1365,17 +1470,24 @@ class Collector:
                 first = decode_record(raw) if len(raw) == 128 else None
             if not first:
                 return
+
             service_date = service_date_from_filename(path, first['dt'])
-            dispatch = self.sb.dispatch(service_date)
-            changes = self.sb.changes(service_date)
-            import_info, events, summaries = analyze_cdt(
-                path, self.cfg, dispatch, changes
-            )
+            context = self.sb.context(service_date)
+            import_info, events, summaries = analyze_cdt(path, self.cfg, context)
             import_info['collector_agent_id'] = self.agent_id
-            self.sb.ingest_taco(import_info, events, summaries)
+            archive_ref = write_local_analysis(
+                self.cfg, import_info, events, summaries
+            )
+            import_info['local_archive_ref'] = archive_ref
+            result = self.sb.ingest_taco(import_info, events, summaries)
+
+            status = import_info.get('match_status', 'pending')
             message = (
-                f'CDT 수집 {path.name}: records={import_info["record_count"]}, '
-                f'events={len(events)}, summaries={len(summaries)}'
+                f'CDT 분석 {path.name}: 운행일={import_info["service_date"]}, '
+                f'수집지연={import_info.get("delay_days", 0)}일, '
+                f'상태={status}, matched={import_info.get("matched_seconds",0)}초, '
+                f'unmatched={import_info.get("unmatched_seconds",0)}초, '
+                f'summaries={len(summaries)}, samples={len(events)}'
             )
             log(message)
             self.remote_activity(
@@ -1383,105 +1495,73 @@ class Collector:
                 message,
                 detail={
                     'file': path.name,
+                    'service_date': import_info['service_date'],
+                    'delay_days': import_info.get('delay_days', 0),
+                    'match_status': status,
                     'records': import_info['record_count'],
-                    'events': len(events),
+                    'event_samples': len(events),
                     'summaries': len(summaries),
+                    'archive_ref': archive_ref,
+                    'db_result': result,
                 },
             )
             _RUNTIME['counters']['taco_files'] += 1
             _RUNTIME['counters']['taco_events'] += len(events)
             mark_success()
-            self.state['processed'][key] = signature
+
+            if status == 'matched':
+                self.state['processed'][key] = signature
+                self.state['pending_cdt'].pop(key, None)
+            else:
+                retry_minutes = max(
+                    10, int(self.cfg.get('pending_retry_minutes', 60))
+                )
+                first_pending = (
+                    pending.get('first_pending_at')
+                    if pending
+                    else now_iso()
+                )
+                age_days = max(
+                    0,
+                    (
+                        datetime.now(KST).date()
+                        - service_date
+                    ).days,
+                )
+                if age_days > int(
+                    self.cfg.get('pending_retention_days', 180)
+                ):
+                    self.state['processed'][key] = signature
+                    self.state['pending_cdt'].pop(key, None)
+                    log(
+                        f'CDT 매칭대기 보존기간 종료: {path.name} '
+                        f'({age_days}일 경과, 마지막 상태={status})',
+                        level='error',
+                    )
+                else:
+                    self.state['pending_cdt'][key] = {
+                        'signature': signature,
+                        'service_date': service_date.isoformat(),
+                        'vehicle_no': import_info.get('vehicle_no'),
+                        'match_status': status,
+                        'first_pending_at': first_pending,
+                        'last_attempt_at': now_iso(),
+                        'next_retry_at': (
+                            datetime.now(KST)
+                            + timedelta(minutes=retry_minutes)
+                        ).isoformat(),
+                    }
+            _RUNTIME['counters']['pending_cdt'] = len(
+                self.state.get('pending_cdt', {})
+            )
             save_json(STATE_PATH, self.state)
         except Exception as exc:
             message = f'CDT 처리 실패 {path.name}: {exc}'
             log(message + '\n' + traceback.format_exc(), level='error')
             self.remote_activity('TACO', message, level='error')
 
-    def etas_loop(self):
-        folder = Path(self.cfg.get('etas_folder', DEFAULT_CONFIG['etas_folder']))
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        log(f'eTAS 리포트 폴더 감시: {folder}')
-        while not self.stop_event.is_set():
-            _RUNTIME['last_etas_scan_at'] = now_iso()
-            try:
-                if folder.exists():
-                    for path in sorted(folder.glob('*')):
-                        if self.stop_event.is_set():
-                            break
-                        if path.is_file() and path.suffix.lower() in ('.xls', '.xlsx'):
-                            self.process_etas(path)
-                else:
-                    log(f'경고: eTAS 폴더가 없습니다: {folder}', level='error')
-            except Exception as exc:
-                log('eTAS 감시 오류: ' + repr(exc), level='error')
-            write_status()
-            self.stop_event.wait(max(10, int(self.cfg.get('etas_scan_seconds', 20))))
-
-    def process_etas(self, path):
-        key = str(path.resolve())
-        stat = path.stat()
-        signature = f'{stat.st_size}:{int(stat.st_mtime)}'
-        if self.state.setdefault('processed_etas', {}).get(key) == signature:
-            return
-        self.stop_event.wait(float(self.cfg.get('stable_seconds', 8)))
-        if self.stop_event.is_set():
-            return
-        stat_after = path.stat()
-        if stat_after.st_size != stat.st_size:
-            return
-        try:
-            sheets = powershell_excel_to_json(path)
-            reports = []
-            for sheet in sheets:
-                rows = sheet.get('rows') or []
-                try:
-                    report = parse_etas_rows(rows, path.name)
-                    reports.append(report)
-                    break
-                except Exception:
-                    continue
-            if not reports:
-                raise ValueError('eTAS 형식을 인식하지 못했습니다.')
-            report = reports[0]
-            report.update(
-                {
-                    'import_source': 'collector',
-                    'source_sha256': sha256_file(path),
-                    'source_path': str(path),
-                    'collector_agent_id': self.agent_id,
-                }
-            )
-            self.sb.import_etas(report)
-            message = (
-                f'eTAS 자동수집 {path.name}: {report["driver_name"]} / '
-                f'{report["analysis_month"][:7]}'
-            )
-            log(message)
-            self.remote_activity(
-                'ETAS',
-                message,
-                detail={
-                    'file': path.name,
-                    'driver': report['driver_name'],
-                    'month': report['analysis_month'],
-                },
-            )
-            _RUNTIME['counters']['etas_files'] += 1
-            mark_success()
-            self.state['processed_etas'][key] = signature
-            save_json(STATE_PATH, self.state)
-        except Exception as exc:
-            message = f'eTAS 처리 실패 {path.name}: {exc}'
-            log(message, level='error')
-            self.remote_activity('ETAS', message, level='error')
-            # Keep it unprocessed so a corrected file or Excel installation can be retried.
-
     def bis_loop(self):
-        log('BIS(TAGO) 차량변경 실시간 감시 시작')
+        log('BIS(TAGO) 실제 운행차량 감시 시작')
         while not self.stop_event.is_set():
             _RUNTIME['last_bis_poll_at'] = now_iso()
             poll_summary = {
@@ -1494,12 +1574,19 @@ class Collector:
             try:
                 current = datetime.now(KST)
                 today = current.date()
-                rows = active_dispatch_rows(self.sb.dispatch(today), current)
+                context = self.sb.context(today)
+                rows = active_dispatch_rows(
+                    context.get('dispatch') or [],
+                    context.get('timetable') or [],
+                    current,
+                    int(self.cfg.get('bis_trip_window_minutes', 150)),
+                )
                 by_route = defaultdict(list)
                 for assignment in rows:
                     route = str(assignment.get('route_no') or '').strip()
                     if route and route != '-1':
                         by_route[route].append(assignment)
+
                 all_changes = []
                 for route, expected_rows in by_route.items():
                     if self.stop_event.is_set():
@@ -1522,14 +1609,15 @@ class Collector:
                         time.sleep(0.2)
                     except Exception as exc:
                         log(f'BIS 노선 {route} 조회 오류: {exc}', level='error')
+
                 if all_changes:
                     result = self.sb.ingest_changes(all_changes)
                     poll_summary['changes'] = len(all_changes)
                     _RUNTIME['counters']['bis_changes'] += len(all_changes)
-                    log(f'BIS 차량변경 저장: {result}')
+                    log(f'BIS 실제차량 연결 저장: {result}')
                     self.remote_activity(
                         'BIS',
-                        f'차량변경 {len(all_changes)}건 저장',
+                        f'실제차량 연결 {len(all_changes)}건 저장',
                         detail=poll_summary,
                     )
                     mark_success()
@@ -1540,7 +1628,9 @@ class Collector:
                 log('BIS 감시 오류: ' + repr(exc), level='error')
                 self.remote_activity('BIS', str(exc), level='error')
             write_status()
-            self.stop_event.wait(max(15, int(self.cfg.get('bis_poll_seconds', 30))))
+            self.stop_event.wait(
+                max(15, int(self.cfg.get('bis_poll_seconds', 30)))
+            )
 
 
 def ensure_config():

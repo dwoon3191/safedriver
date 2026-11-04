@@ -6,9 +6,8 @@
   "agent_id": "DAEWOON-OFFICE-01",
   "web_url": "https://dwoondriver.netlify.app",
   "taco_folder": "E:\\Choyoung\\ADTviewer\\Data",
-  "etas_folder": "E:\\Choyoung\\ADTviewer\\eTAS",
+  "analysis_folder": "E:\\Choyoung\\ADTviewer\\SafeDriveAnalysis",
   "scan_seconds": 5,
-  "etas_scan_seconds": 20,
   "stable_seconds": 8,
   "heartbeat_seconds": 15,
   "tago_service_key": "DATA_GO_KR_GENERAL_API_KEY",
@@ -17,8 +16,15 @@
   "bis_poll_seconds": 30,
   "bis_confirm_polls": 2,
   "bis_recent_minutes": 12,
+  "bis_trip_window_minutes": 150,
   "speed_watch_kmh": 80,
+  "pending_retry_minutes": 60,
+  "pending_retention_days": 180,
+  "final_match_ratio": 0.90,
+  "max_event_samples_per_type": 3,
+  "event_retention_days": 90,
+  "activity_retention_days": 30,
+  "audit_retention_days": 180,
   "enable_bis": true,
-  "enable_taco": true,
-  "enable_etas_auto": true
+  "enable_taco": true
 }
