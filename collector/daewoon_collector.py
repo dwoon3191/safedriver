@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = 'DaewoonCollector-1.2.0'
+VERSION = 'DaewoonCollector-1.3.0'
 KST = timezone(timedelta(hours=9))
 DTG_EPOCH = datetime(2000, 1, 1)
 RECORD_SIZE = 128
@@ -938,7 +938,7 @@ class Tago:
         )
         request = urllib.request.Request(
             url + '?' + query,
-            headers={'User-Agent': 'DaewoonSafeDrive/1.2'},
+            headers={'User-Agent': 'DaewoonSafeDrive/1.3'},
         )
         with urllib.request.urlopen(request, timeout=25) as response:
             data = json.loads(response.read().decode('utf-8', 'replace'))
@@ -1232,6 +1232,12 @@ def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
         'missing': len(missing),
         'unexpected': len(unexpected),
         'pairs': len(pairs),
+        # This is a short-lived diagnostic snapshot only. It is overwritten on
+        # every poll and is not uploaded as a full BIS position history.
+        'expected_vehicles': sorted(expected.keys()),
+        'live_vehicles': sorted(live_map.keys()),
+        'missing_vehicles': sorted(missing),
+        'unexpected_vehicles': sorted(unexpected),
     }
 
 
@@ -1292,7 +1298,11 @@ class Collector:
     def handle_commands(self):
         try:
             commands = self.sb.fetch_commands(self.agent_id)
+            if str(_RUNTIME.get('last_error') or '').startswith('Collector 명령 조회 오류'):
+                _RUNTIME['last_error'] = ''
+                write_status()
         except Exception as exc:
+            # Remote control failure must not stop BIS/CDT collection.
             log(f'Collector 명령 조회 오류: {exc}', level='error')
             return
         for command in commands:
@@ -1570,6 +1580,7 @@ class Collector:
                 'live': 0,
                 'mismatches': 0,
                 'changes': 0,
+                'route_details': [],
             }
             try:
                 current = datetime.now(KST)
@@ -1606,6 +1617,8 @@ class Collector:
                         poll_summary['expected'] += summary['expected']
                         poll_summary['live'] += summary['live']
                         poll_summary['mismatches'] += summary['pairs']
+                        if len(poll_summary['route_details']) < 30:
+                            poll_summary['route_details'].append(summary)
                         time.sleep(0.2)
                     except Exception as exc:
                         log(f'BIS 노선 {route} 조회 오류: {exc}', level='error')

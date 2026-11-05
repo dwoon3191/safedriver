@@ -8,6 +8,7 @@
     session: null,
     page: 'dashboard',
     refreshTimer: null,
+    usageTimer: null,
   };
 
   const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({
@@ -23,6 +24,14 @@
     return Number.isNaN(date.getTime()) ? (value || '') : date.toLocaleString('ko-KR', { hour12: false });
   };
   const todayISO = () => new Date().toISOString().slice(0, 10);
+  const ANALYSIS_START = '2026-10-01';
+  const fmtDuration = seconds => {
+    const total = Math.max(0, Number(seconds || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (hours) return `${hours}시간 ${minutes}분`;
+    return `${minutes}분`;
+  };
 
   function toast(message, error = false) {
     const element = $('#toast');
@@ -50,6 +59,13 @@
     if (state.refreshTimer) {
       clearInterval(state.refreshTimer);
       state.refreshTimer = null;
+    }
+  }
+
+  function clearUsageTimer() {
+    if (state.usageTimer) {
+      clearInterval(state.usageTimer);
+      state.usageTimer = null;
     }
   }
 
@@ -110,6 +126,43 @@
     return data;
   }
 
+  async function rpcWithCfg(url, key, functionName, body = {}) {
+    const base = String(url || '').replace(/\/$/, '');
+    if (!base || !key) throw new Error('Supabase URL과 publishable/anon key가 필요합니다.');
+    const response = await fetch(`${base}/rest/v1/rpc/${functionName}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: key, Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    let data;
+    try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+    if (!response.ok) throw new Error(data?.message || data?.hint || text || `HTTP ${response.status}`);
+    return data;
+  }
+
+  function usageClientInfo(reason = 'heartbeat') {
+    return {
+      reason,
+      page: state.page || '',
+      user_agent: navigator.userAgent || '',
+      platform: navigator.platform || '',
+      screen: `${screen.width || 0}x${screen.height || 0}`,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+    };
+  }
+
+  async function touchUsage(reason = 'heartbeat') {
+    if (!state.session?.token || !state.cfg?.url || !state.cfg?.key) return;
+    try { await rpc('app_touch', { p_token: token(), p_client_info: usageClientInfo(reason) }); } catch {}
+  }
+
+  function startUsageTracking() {
+    clearUsageTimer();
+    touchUsage('enter');
+    state.usageTimer = setInterval(() => touchUsage('heartbeat'), 60000);
+  }
+
   const token = () => state.session?.token || '';
   function saveSession(session) {
     state.session = session;
@@ -131,7 +184,7 @@
       try {
         const me = await rpc('app_me', { p_token: saved.token });
         saveSession({ ...saved, ...me });
-        enterApp();
+        await enterApp();
         return;
       } catch {
         clearSession();
@@ -166,7 +219,7 @@
       if (!id || !password) return toast('아이디와 비밀번호를 입력하세요.', true);
       const session = await rpc('app_login', { p_login_id: id, p_password: password });
       saveSession(session);
-      enterApp();
+      await enterApp();
     } catch (error) {
       toast(error.message, true);
     }
@@ -174,18 +227,50 @@
 
   $('#logoutBtn').onclick = async () => {
     clearRefreshTimer();
+    clearUsageTimer();
+    await touchUsage('logout');
     try { await rpc('app_logout', { p_token: token() }); } catch {}
     clearSession();
     show('loginView');
   };
   $('#menuBtn').onclick = () => $('.sidebar').classList.toggle('open');
 
-  function enterApp() {
+  async function enterApp() {
     show('appView');
     $('#userBox').innerHTML = `<b>${esc(state.session.display_name)}</b><br><span>${state.session.role === 'admin' ? '관리자' : '운전자'}</span>`;
     buildNav();
+    startUsageTracking();
+    if (state.session.role === 'admin') await ensureAdminDeviceSetup();
     if (state.session.must_change_password) setTimeout(forcePasswordChange, 150);
     navigate('dashboard');
+  }
+
+  async function ensureAdminDeviceSetup() {
+    const keyName = `daewoon_admin_device_setup_v13_${state.session.user_id}`;
+    if (localStorage.getItem(keyName) === 'ok') return;
+    openModal(`<h2>관리자 기기 연결 설정</h2>
+      <p class="notice warn">이 컴퓨터·휴대전화에서 관리자로 처음 로그인했습니다. 관리자만 Supabase 연결값을 확인·등록합니다. 기사 로그인에는 이 과정이 표시되지 않습니다.</p>
+      <div class="form-grid">
+        <label class="span-2">Supabase URL<input id="adminSetupUrl" value="${esc(state.cfg.url)}" placeholder="https://xxxx.supabase.co"></label>
+        <label class="span-2">Publishable / anon key<textarea id="adminSetupKey" rows="4" placeholder="sb_publishable_... 또는 anon key">${esc(state.cfg.key)}</textarea></label>
+      </div>
+      <button id="adminSetupSave" class="btn primary full">연결 확인 및 이 기기에 등록</button>
+      <p class="small muted">service_role 또는 secret key는 입력하지 않습니다. 등록값은 이 브라우저에만 저장됩니다.</p>`);
+    $('#modalClose').classList.add('hidden');
+    await new Promise(resolve => {
+      $('#adminSetupSave').onclick = async () => {
+        const url = $('#adminSetupUrl').value.trim();
+        const key = $('#adminSetupKey').value.trim();
+        try {
+          await rpcWithCfg(url, key, 'app_me', { p_token: token() });
+          saveCfg(url, key);
+          localStorage.setItem(keyName, 'ok');
+          closeModal();
+          toast('관리자 기기 연결설정을 완료했습니다.');
+          resolve();
+        } catch (error) { toast(`연결 확인 실패: ${error.message}`, true); }
+      };
+    });
   }
 
   function buildNav() {
@@ -196,6 +281,7 @@
       ['reports', '◫ 기사 운행분석'],
       ['changes', '⇄ 차량변경'],
       ['collector', '● 수집현황'],
+      ['linkage', '⇆ 데이터 연계'],
       ['drivers', '♙ 기사 계정'],
       ['acks', '✓ 확인현황'],
       ['audit', '◷ 작업이력'],
@@ -220,6 +306,7 @@
   function navigate(page) {
     clearRefreshTimer();
     state.page = page;
+    touchUsage(`page:${page}`);
     $$('.nav-btn').forEach(button => button.classList.toggle('active', button.dataset.page === page));
     const titles = {
       dashboard: state.session.role === 'admin' ? '운영 대시보드' : '나의 안전운전 분석',
@@ -228,6 +315,7 @@
       reports: '기사별 SafeDrive 운행분석',
       changes: 'BIS 차량변경',
       collector: '자료수집·Collector 현황',
+      linkage: '배차·BIS·CDT 데이터 연계',
       drivers: '기사 계정',
       acks: '분석결과 확인현황',
       audit: '작업 이력',
@@ -252,6 +340,7 @@
       if (page === 'reports') return reportsPage();
       if (page === 'changes') return changesPage();
       if (page === 'collector') return collectorPage();
+      if (page === 'linkage') return linkagePage();
       if (page === 'drivers') return driversPage();
       if (page === 'acks') return ackPage();
       if (page === 'audit') return auditPage();
@@ -910,13 +999,13 @@
     $('#page').innerHTML = `<div class="card">
       <div class="toolbar">
         <label>기사 선택<select id="reportDriver"><option value="">전체 기사</option></select></label>
-        <label>시작일<input id="reportFrom" type="date"></label>
-        <label>종료일<input id="reportTo" type="date"></label>
+        <label>시작일<input id="reportFrom" type="date" value="${ANALYSIS_START}"></label>
+        <label>종료일<input id="reportTo" type="date" value="${todayISO()}"></label>
         <button id="loadReports" class="btn primary">조회</button>
       </div>
-      <p class="notice"><b>SafeDrive 자체 운행분석</b>입니다. 교통안전공단 보고서의 시각적 구성과 위험운전 항목을 참고하되, CDT 1초 데이터와 회사 기준으로 산출하므로 공단 공식점수와 구분합니다.</p>
+      <p class="notice"><b>2026년 10월 1일부터 월 단위로 관리하는 SafeDrive 자체 운행분석</b>입니다. 교통안전공단 보고서의 시각적 구성과 위험운전 항목을 참고하되, CDT 1초 데이터와 회사 기준으로 산출하므로 공단 공식점수와 구분합니다.</p>
     </div><div id="reportContent"></div>`;
-    const initial = await rpc('admin_driver_reports', { p_token: token(), p_driver_name: null, p_from: null, p_to: null, p_limit: 500 });
+    const initial = await rpc('admin_driver_reports', { p_token: token(), p_driver_name: null, p_from: ANALYSIS_START, p_to: todayISO(), p_limit: 500 });
     $('#reportDriver').innerHTML += (initial.drivers || []).map(driver => `<option value="${esc(driver.display_name)}">${esc(driver.display_name)}</option>`).join('');
     $('#loadReports').onclick = loadDriverReports;
     renderDriverReports(initial);
@@ -969,7 +1058,7 @@
       <div class="section-title"><h3>기사별 일일 운행분석</h3><span>${daily.length}건</span></div>
       ${daily.length ? `<div class="report-card-grid">${daily.map(analysisCard).join('')}</div>` : '<div class="card empty">분석자료가 없습니다.</div>'}
       <div class="section-title"><h3>월간 추이</h3></div>
-      ${monthly.length ? `<div class="table-wrap"><table><thead><tr><th>기사</th><th>분석월</th><th>운행일</th><th>거리</th><th>평균점수</th><th>급출발</th><th>급가속</th><th>급감속</th><th>급정지</th><th>과속후보</th></tr></thead><tbody>${monthly.map(row => `<tr><td><b>${esc(row.driver_name)}</b></td><td>${esc(row.analysis_month)}</td><td>${row.days_count}</td><td>${num(row.distance_km).toFixed(1)}km</td><td>${num(row.avg_score).toFixed(1)}</td><td>${row.rapid_start}</td><td>${row.rapid_accel}</td><td>${row.rapid_decel}</td><td>${row.rapid_stop}</td><td>${row.speed_watch}</td></tr>`).join('')}</tbody></table></div>` : '<div class="card empty">월간집계가 없습니다.</div>'}`;
+      ${monthly.length ? `<div class="table-wrap"><table><thead><tr><th>기사</th><th>분석월</th><th>운행일</th><th>거리</th><th>평균점수</th><th>전체후보/100km</th><th>급출발</th><th>급가속</th><th>급감속</th><th>급정지</th><th>과속후보</th></tr></thead><tbody>${monthly.map(row => `<tr><td><b>${esc(row.driver_name)}</b></td><td>${esc(row.analysis_month)}</td><td>${row.days_count}</td><td>${num(row.distance_km).toFixed(1)}km</td><td>${num(row.avg_score).toFixed(1)}</td><td>${num(row.total_events_per_100km).toFixed(2)}</td><td>${row.rapid_start}</td><td>${row.rapid_accel}</td><td>${row.rapid_decel}</td><td>${row.rapid_stop}</td><td>${row.speed_watch}</td></tr>`).join('')}</tbody></table></div>` : '<div class="card empty">월간집계가 없습니다.</div>'}`;
   }
 
   // ---------- BIS changes ----------
@@ -1015,6 +1104,8 @@
       ${agents.length ? agents.map(agent => `<div class="card collector-agent"><div class="agent-head"><div><b>${esc(agent.agent_id)}</b><small>${esc(agent.host_name || '')} · ${esc(agent.version || '')}</small></div>${badge(agent.online ? 'ONLINE' : agent.status || 'OFFLINE')}</div>
       <div class="grid cols-4 compact-metrics"><div class="metric"><span class="label">마지막 Heartbeat</span><span class="value mini">${fmtDT(agent.last_heartbeat_at)}</span></div><div class="metric"><span class="label">CDT 검색</span><span class="value mini">${agent.last_taco_scan_at ? fmtDT(agent.last_taco_scan_at) : '-'}</span></div><div class="metric"><span class="label">BIS 조회</span><span class="value mini">${agent.last_bis_poll_at ? fmtDT(agent.last_bis_poll_at) : '-'}</span></div><div class="metric"><span class="label">매칭 대기</span><span class="value">${agent.counters?.pending_cdt || 0}</span></div></div>
       <div class="agent-counters">CDT 처리 ${agent.counters?.taco_files || 0}파일 · 대표이벤트 ${agent.counters?.taco_events || 0}건 · BIS 조회 ${agent.counters?.bis_polls || 0}회 · 실제차량 연결 ${agent.counters?.bis_changes || 0}건</div>
+      ${agent.counters?.last_bis_summary ? `<div class="notice"><b>최근 BIS 비교:</b> 활성노선 ${agent.counters.last_bis_summary.routes || 0}개 · 예정차량 ${agent.counters.last_bis_summary.expected || 0}대 · 실제차량 ${agent.counters.last_bis_summary.live || 0}대 · 불일치 후보 ${agent.counters.last_bis_summary.mismatches || 0}쌍 · 확정 ${agent.counters.last_bis_summary.changes || 0}건</div>` : ''}
+      ${(agent.counters?.last_bis_summary?.route_details || []).length ? `<div class="table-wrap compact-table"><table><thead><tr><th>노선</th><th>예정</th><th>실제</th><th>미확인 예정차량</th><th>예상외 실제차량</th><th>후보</th><th>오류</th></tr></thead><tbody>${agent.counters.last_bis_summary.route_details.map(r => `<tr><td><b>${esc(r.route)}</b></td><td>${r.expected || 0}</td><td>${r.live || 0}</td><td>${esc((r.missing_vehicles || []).join(', ') || '-')}</td><td>${esc((r.unexpected_vehicles || []).join(', ') || '-')}</td><td>${r.pairs || 0}</td><td>${esc(r.error || '')}</td></tr>`).join('')}</tbody></table></div>` : ''}
       ${agent.last_error ? `<div class="notice warn">최근 오류: ${esc(agent.last_error)}</div>` : ''}
       <div class="toolbar"><button class="btn secondary collector-command" data-agent="${esc(agent.agent_id)}" data-command="reload">설정 재읽기</button><button class="btn secondary collector-command" data-agent="${esc(agent.agent_id)}" data-command="restart">재시작 요청</button><button class="btn danger collector-command" data-agent="${esc(agent.agent_id)}" data-command="stop">종료 요청</button></div></div>`).join('') : '<div class="card empty">등록된 Collector가 없습니다. 회사 PC에서 백그라운드 Collector를 설치·실행하세요.</div>'}
       <div class="section-title"><h3>최근 수집 활동</h3></div>
@@ -1035,9 +1126,32 @@
     if (!silent) toast('수집현황을 불러왔습니다.');
   }
 
+  async function linkagePage() {
+    $('#page').innerHTML = `<div class="card"><h3>배차·시간표·BIS·CDT 연계 확인</h3><p class="notice">선택한 운행일의 데이터가 어느 단계까지 연결되었는지 확인합니다. 차량변경 0건인 경우에도 배차·시간표·BIS 조회조건과 CDT 매칭상태를 단계별로 확인할 수 있습니다.</p><div class="toolbar"><label>운행일<input id="linkageDate" type="date" value="${todayISO()}"></label><button id="loadLinkage" class="btn primary">연계상태 조회</button></div></div><div id="linkageContent"></div>`;
+    $('#loadLinkage').onclick = loadLinkageStatus;
+    await loadLinkageStatus();
+  }
+
+  async function loadLinkageStatus() {
+    const date = $('#linkageDate').value;
+    const data = await rpc('admin_linkage_status', { p_token: token(), p_service_date: date });
+    const c = data.counts || {};
+    $('#linkageContent').innerHTML = `<div class="pipeline-grid"><div class="pipeline-step"><span>1</span><b>배차표</b><strong>${c.dispatch || 0}건</strong><small>기사·예정차량</small></div><div class="pipeline-step"><span>2</span><b>운행시간표</b><strong>${c.timetable || 0}슬롯</strong><small>${esc(data.day_type || '-')}</small></div><div class="pipeline-step"><span>3</span><b>BIS 실제차량</b><strong>${c.bindings || 0}연결</strong><small>변경 ${c.changes || 0}건</small></div><div class="pipeline-step"><span>4</span><b>CDT 수집</b><strong>${c.taco_imports || 0}파일</strong><small>대기 ${c.taco_pending || 0}</small></div><div class="pipeline-step"><span>5</span><b>기사 분석</b><strong>${c.driver_daily || 0}건</strong><small>매칭 ${c.taco_matched || 0}</small></div></div>
+      <div class="card"><h3>적용 시간표</h3><p>${data.timetable_version ? `${esc(data.timetable_version.version_name)} · ${data.timetable_version.effective_from}부터 · ${esc(data.timetable_version.season_type)}` : '적용 가능한 시간표가 없습니다.'}</p></div>
+      <div class="section-title"><h3>BIS 실제차량 연결</h3></div>${tableBindings(data.bindings || [])}
+      <div class="section-title"><h3>CDT 수집·매칭</h3></div>${tableImports(data.imports || [])}
+      <div class="section-title"><h3>기사별 분석 생성</h3></div>${tableTaco(data.daily || [])}
+      <details class="card"><summary><b>배차 원본 ${data.dispatch?.length || 0}건 보기</b></summary>${data.dispatch?.length ? `<div class="table-wrap"><table><thead><tr><th>차량</th><th>기사</th><th>근무</th><th>노선</th><th>순번</th><th>시작</th><th>종료</th></tr></thead><tbody>${data.dispatch.map(r => `<tr><td>${esc(r.vehicle_no)}</td><td>${esc(r.driver_name)}</td><td>${esc(r.shift_type)}</td><td>${esc(r.route_no)}</td><td>${r.run_order > 0 ? r.run_order : '-'}</td><td>${r.shift_start ? fmtDT(r.shift_start) : '-'}</td><td>${r.shift_end ? fmtDT(r.shift_end) : '-'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">배차자료 없음</div>'}</details>`;
+  }
+
+  function tableBindings(rows) {
+    if (!rows?.length) return '<div class="card empty">BIS로 확정된 실제차량 연결이 없습니다. Collector의 최근 BIS 비교표에서 예정/실제 차량과 오류를 확인하세요.</div>';
+    return `<div class="table-wrap"><table><thead><tr><th>노선</th><th>순번</th><th>기사</th><th>예정차량</th><th>실제차량</th><th>유효시작</th><th>유효종료</th><th>유형</th><th>신뢰도</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.route_no)}</td><td>${r.run_order > 0 ? r.run_order : '-'}</td><td>${esc(r.driver_name)}</td><td>${esc(r.planned_vehicle)}</td><td><b>${esc(r.actual_vehicle)}</b></td><td>${fmtDT(r.valid_from_at)}</td><td>${r.valid_to_at ? fmtDT(r.valid_to_at) : '-'}</td><td>${esc(r.binding_type)}</td><td>${badge(r.confidence)}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+
   async function driversPage() {
     const rows = await rpc('admin_list_users', { p_token: token() });
-    $('#page').innerHTML = `<div class="notice">일일 배차표 업로드 시 기사 이름으로 계정이 자동 생성됩니다. 초기 비밀번호는 1111이며 첫 로그인 후 변경이 강제됩니다.</div><div class="section-title"><h3>사용자</h3></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>이름</th><th>역할</th><th>비밀번호변경</th><th>최근로그인</th><th></th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.login_id)}</td><td><b>${esc(row.display_name)}</b></td><td>${row.role}</td><td>${row.must_change_password ? '필요' : '완료'}</td><td>${row.last_login_at ? fmtDT(row.last_login_at) : '-'}</td><td>${row.role === 'driver' ? `<button class="btn danger resetpw" data-id="${row.id}">1111로 초기화</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+    $('#page').innerHTML = `<div class="notice">로그인 횟수와 사용시간은 <b>v1.3.0 적용 이후</b>부터 60초 주기로 계산됩니다. 브라우저를 강제 종료한 경우 마지막 통신시각까지만 사용시간으로 반영합니다.</div><div class="section-title"><h3>사용자·접속현황</h3></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>이름</th><th>역할</th><th>비밀번호변경</th><th>로그인 횟수</th><th>누적 사용시간</th><th>최근 활동</th><th>상태</th><th>최근 로그인</th><th></th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.login_id)}</td><td><b>${esc(row.display_name)}</b></td><td>${row.role}</td><td>${row.must_change_password ? '필요' : '완료'}</td><td>${row.login_count || 0}</td><td>${fmtDuration(row.active_seconds)}</td><td>${row.last_seen_at ? fmtDT(row.last_seen_at) : '-'}</td><td>${row.online ? '<span class="badge good">ONLINE</span>' : '<span class="badge warn">OFFLINE</span>'}</td><td>${row.last_login_at ? fmtDT(row.last_login_at) : '-'}</td><td>${row.role === 'driver' ? `<button class="btn danger resetpw" data-id="${row.id}">1111로 초기화</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
     $$('.resetpw').forEach(button => button.onclick = async () => {
       if (!confirm('비밀번호를 1111로 초기화할까요?')) return;
       try { await rpc('admin_reset_password', { p_token: token(), p_user_id: button.dataset.id }); toast('초기화했습니다.'); driversPage(); } catch (error) { toast(error.message, true); }
@@ -1057,17 +1171,25 @@
   async function driverDashboard() {
     const data = await rpc('driver_dashboard', { p_token: token(), p_limit: 30 });
     const latest = data.daily?.[0];
+    const latestMonth = data.monthly?.[0];
     const publication = data.publications?.[0];
-    $('#page').innerHTML = `<div class="card driver-hero"><span class="kicker">MY SAFE DRIVE</span><h2>${esc(state.session.display_name)} 기사님</h2><div class="grid cols-3">
+    $('#page').innerHTML = `<div class="card driver-hero"><span class="kicker">MY SAFE DRIVE</span><h2>${esc(state.session.display_name)} 기사님</h2><div class="grid cols-4">
       <div class="metric"><span class="label muted">최근 SafeDrive 점수</span><span class="level">${latest?.safety_score ?? '자료 없음'}</span></div>
       <div class="metric"><span class="label muted">최근 안전수준</span><span class="level">${esc(latest?.safety_level || '-')}</span></div>
+      <div class="metric"><span class="label muted">최근 월 평균</span><span class="level">${latestMonth?.avg_score ?? '-'}</span><small>${esc(latestMonth?.analysis_month || '')}</small></div>
       <div class="metric"><span class="label muted">분석결과 확인</span><span class="level">${publication ? (publication.acknowledged ? '완료' : '미확인') : '-'}</span></div></div></div>
-      <div class="notice">SafeDrive 결과는 CDT 운행기록과 배차·BIS 실제차량 연결자료를 이용한 회사 자체 분석입니다. 교통안전공단 공식점수와 구분되며 안전운전 개선과 피드백을 목적으로 합니다.</div>
+      <div class="notice">SafeDrive 결과는 2026년 10월 1일부터 CDT 운행기록과 배차·BIS 실제차량 연결자료를 이용해 월 단위로 관리하는 회사 자체 분석입니다. 교통안전공단 공식점수와 구분되며 안전운전 개선과 피드백을 목적으로 합니다.</div>
       <div class="section-title"><h3>나에게 공개된 운행분석</h3></div>${renderPublications(data.publications)}
+      <div class="section-title"><h3>월간 운행습관</h3></div>${renderMonthlyTable(data.monthly || [], false)}
       <div class="section-title"><h3>최근 일일 운행분석</h3></div>${tableTaco(data.daily || [])}`;
     $$('.ackbtn').forEach(button => button.onclick = async () => {
       try { await rpc('driver_acknowledge', { p_token: token(), p_publication_id: Number(button.dataset.id), p_comment: null }); toast('확인 처리했습니다.'); driverDashboard(); } catch (error) { toast(error.message, true); }
     });
+  }
+
+  function renderMonthlyTable(rows, showDriver = true) {
+    if (!rows?.length) return '<div class="card empty">월간 분석자료가 없습니다.</div>';
+    return `<div class="table-wrap"><table><thead><tr>${showDriver ? '<th>기사</th>' : ''}<th>분석월</th><th>운행일</th><th>거리</th><th>평균점수</th><th>후보/100km</th><th>급출발</th><th>급가속</th><th>급감속</th><th>급정지</th><th>과속후보</th></tr></thead><tbody>${rows.map(row => `<tr>${showDriver ? `<td><b>${esc(row.driver_name)}</b></td>` : ''}<td>${esc(row.analysis_month)}</td><td>${row.days_count}</td><td>${num(row.distance_km).toFixed(1)}km</td><td>${num(row.avg_score).toFixed(1)}</td><td>${num(row.total_events_per_100km).toFixed(2)}</td><td>${row.rapid_start || 0}</td><td>${row.rapid_accel || 0}</td><td>${row.rapid_decel || 0}</td><td>${row.rapid_stop || 0}</td><td>${row.speed_watch || 0}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
   function flattenRecommendations(value) {
@@ -1087,14 +1209,14 @@
 
   async function driverHistory() {
     const data = await rpc('driver_dashboard', { p_token: token(), p_limit: 100 });
-    $('#page').innerHTML = `<div class="section-title"><h3>배차·운행이력</h3></div>${data.dispatch?.length ? `<div class="table-wrap"><table><thead><tr><th>일자</th><th>차량</th><th>노선</th><th>순번</th><th>근무</th></tr></thead><tbody>${data.dispatch.map(row => `<tr><td>${row.service_date}</td><td>${esc(row.vehicle_no)}</td><td>${esc(row.route_no)}</td><td>${row.run_order > 0 ? row.run_order : '-'}</td><td>${row.shift_start ? fmtDT(row.shift_start) : row.shift_type}</td></tr>`).join('')}</tbody></table></div>` : '<div class="card empty">배차 이력이 없습니다.</div>'}<div class="section-title"><h3>차량교체 이력</h3></div>${tableChanges(data.vehicle_changes || [])}`;
+    $('#page').innerHTML = `<div class="section-title"><h3>월간 운행습관</h3></div>${renderMonthlyTable(data.monthly || [], false)}<div class="section-title"><h3>배차·운행이력</h3></div>${data.dispatch?.length ? `<div class="table-wrap"><table><thead><tr><th>일자</th><th>차량</th><th>노선</th><th>순번</th><th>근무</th></tr></thead><tbody>${data.dispatch.map(row => `<tr><td>${row.service_date}</td><td>${esc(row.vehicle_no)}</td><td>${esc(row.route_no)}</td><td>${row.run_order > 0 ? row.run_order : '-'}</td><td>${row.shift_start ? fmtDT(row.shift_start) : row.shift_type}</td></tr>`).join('')}</tbody></table></div>` : '<div class="card empty">배차 이력이 없습니다.</div>'}<div class="section-title"><h3>차량교체 이력</h3></div>${tableChanges(data.vehicle_changes || [])}`;
   }
 
   function settingsPage() {
     $('#page').innerHTML = `<div class="grid cols-2">
       <div class="card"><h3>비밀번호 변경</h3><div class="form-grid"><label>현재 비밀번호<input id="spOld" type="password"></label><label>새 비밀번호<input id="spNew" type="password"></label></div><button id="spBtn" class="btn primary">변경</button></div>
       ${state.session.role === 'admin' ? `<div class="card"><h3>Supabase 연결</h3><p class="small muted">관리자 설치 단계에서만 등록합니다. 기사 계정에는 이 메뉴가 표시되지 않습니다.</p><label>URL<input id="cfgUrl" value="${esc(state.cfg.url)}"></label><label>anon/publishable key<textarea id="cfgKey" rows="3">${esc(state.cfg.key)}</textarea></label><div class="toolbar"><button id="cfgBtn" class="btn secondary">현재 브라우저 저장</button><button id="cfgDownloadBtn" class="btn primary">배포용 config.js 생성</button></div><p class="small muted">생성한 config.js를 웹앱 루트에 1회 배포하면 기사 휴대전화에서는 URL/key 입력 없이 로그인합니다. 업데이트 ZIP은 config.js를 제외하여 운영값을 보존합니다.</p></div>
-      <div class="card span-2"><h3>백그라운드 Collector</h3><ol class="install-steps"><li><code>collector/setup_windows.bat</code> 실행 - 기존 설정과 처리상태 보존</li><li><code>install_autostart_task.bat</code>를 관리자 권한으로 실행</li><li><code>collector_control.bat</code>에서 시작·종료·상태 확인</li></ol><div class="code-note">CDT 자동수집: E:\\Choyoung\\ADTviewer\\Data (입고·수리로 며칠 늦게 들어와도 운행일 기준 재매칭)<br>BIS: 국토교통부 TAGO 실시간 조회 - 전체 위치는 미저장<br>Supabase: 배차·시간표·차량변경·기사별 집계·대표 이벤트만 저장<br>Collector 제어창을 닫아도 수집은 계속되며 설정/처리이력은 리셋되지 않음</div></div>` : ''}</div>`;
+      <div class="card span-2"><h3>백그라운드 Collector</h3><ol class="install-steps"><li><code>collector/SafeDrive_Collector_Control.bat</code>만 실행</li><li>제어센터의 <b>환경 설정</b>에서 Supabase·TAGO·CDT 폴더 등록</li><li><b>연결 진단</b> 후 <b>자동실행 설치</b> 및 <b>수집 시작</b></li></ol><div class="code-note">CDT 자동수집: E:\\Choyoung\\ADTviewer\\Data (입고·수리로 며칠 늦게 들어와도 운행일 기준 재매칭)<br>BIS: 국토교통부 TAGO 실시간 조회 - 전체 위치는 미저장<br>Supabase: 배차·시간표·차량변경·기사별 집계·대표 이벤트만 저장<br>Collector 제어창을 닫아도 수집은 계속되며 설정/처리이력은 리셋되지 않음</div></div>` : ''}</div>`;
     $('#spBtn').onclick = async () => {
       try { await rpc('app_change_password', { p_token: token(), p_old_password: $('#spOld').value, p_new_password: $('#spNew').value }); toast('비밀번호를 변경했습니다.'); } catch (error) { toast(error.message, true); }
     };
@@ -1107,6 +1229,18 @@
       toast('config.js를 생성했습니다. GitHub/Netlify 루트에 배포하세요.');
     };
   }
+
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) touchUsage('visible'); });
+  window.addEventListener('pagehide', () => {
+    if (!state.session?.token || !state.cfg?.url || !state.cfg?.key) return;
+    try {
+      fetch(`${state.cfg.url}/rest/v1/rpc/app_touch`, {
+        method: 'POST', keepalive: true,
+        headers: { 'Content-Type': 'application/json', apikey: state.cfg.key, Authorization: `Bearer ${state.cfg.key}` },
+        body: JSON.stringify({ p_token: token(), p_client_info: usageClientInfo('pagehide') }),
+      });
+    } catch {}
+  });
 
   init();
 })();

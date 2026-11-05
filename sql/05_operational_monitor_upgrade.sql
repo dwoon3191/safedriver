@@ -226,24 +226,25 @@ end $$;
 
 create or replace function public.collector_fetch_commands(p_token text,p_agent_id text)
 returns jsonb language plpgsql security definer set search_path=public,extensions as $$
+declare v_result jsonb;
 begin
   perform public._require_admin(p_token);
-  return coalesce((
-    with picked as (
-      select id from public.collector_commands
-      where agent_id=p_agent_id and status='pending'
-      order by requested_at
-      limit 10
-      for update skip locked
-    ), delivered as (
-      update public.collector_commands c
-      set status='delivered',delivered_at=now()
-      from picked p
-      where c.id=p.id
-      returning c.id,c.command,c.requested_at
-    )
-    select jsonb_agg(to_jsonb(delivered)) from delivered
-  ),'[]'::jsonb);
+  with picked as (
+    select id from public.collector_commands
+    where agent_id=p_agent_id and status='pending'
+    order by requested_at
+    limit 10
+    for update skip locked
+  ), delivered as (
+    update public.collector_commands c
+    set status='delivered',delivered_at=now()
+    from picked p
+    where c.id=p.id
+    returning c.id,c.command,c.requested_at
+  )
+  select coalesce(jsonb_agg(to_jsonb(delivered)),'[]'::jsonb)
+  into v_result from delivered;
+  return coalesce(v_result,'[]'::jsonb);
 end $$;
 
 create or replace function public.collector_complete_command(
