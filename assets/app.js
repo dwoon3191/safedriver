@@ -9,6 +9,9 @@
     page: 'dashboard',
     refreshTimer: null,
     usageTimer: null,
+    fleet: null,
+    fleetPreview: null,
+    fleetReadSequence: 0,
   };
 
   const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({
@@ -1193,17 +1196,82 @@
     if (!silent) toast('수집현황을 불러왔습니다.');
   }
 
+  function fleetCard() {
+    return `<div class="card"><h3>대운교통 보유차량 명부</h3>
+      <p class="notice">‘대운교통 차량종합’ 시트의 차량번호만 등록합니다. 재등록하면 새 목록이 적용되며, 제외 차량의 기존 운행자료는 삭제하지 않습니다.</p>
+      <div id="fleetStatus">명부 확인 중…</div>
+      <div class="toolbar"><label>차량현황 엑셀<input id="fleetFile" type="file" accept=".xlsx" disabled></label></div>
+      <div id="fleetPreview"></div></div>`;
+  }
+
+  function renderFleetStatus() {
+    const f = state.fleet;
+    $('#fleetStatus').innerHTML = f.vehicles.length
+      ? `<p><b>등록 ${f.vehicles.length}대</b> · ${esc(f.source_file)} · ${fmtDT(f.updated_at)}</p><details><summary>등록 차량번호 보기</summary><p>${f.vehicles.map(esc).join(', ')}</p></details>`
+      : '<p class="notice">명부 미등록: BIS·CDT 수집을 시작하기 전에 엑셀을 등록하세요.</p>';
+  }
+
+  async function previewFleetFile() {
+    const sequence = ++state.fleetReadSequence;
+    state.fleetPreview = null;
+    $('#fleetPreview').innerHTML = '';
+    const file = $('#fleetFile').files[0];
+    if (!file) return;
+    try {
+      if (!/\.xlsx$/i.test(file.name)) throw new Error('.xlsx 파일을 선택하세요.');
+      const vehicles = window.DaewoonFleet.parse(await readWorkbook(file));
+      if (sequence !== state.fleetReadSequence || !$('#fleetPreview')) return;
+      const changes = window.DaewoonFleet.diff(state.fleet.vehicles, vehicles);
+      state.fleetPreview = { vehicles, source: file.name, revision: state.fleet.revision };
+      $('#fleetPreview').innerHTML = `<p><b>등록 예정 ${vehicles.length}대</b> · 추가 ${changes.added.length}대 · 제외 ${changes.removed.length}대</p>
+        <details><summary>추가·제외 차량 확인</summary><p>추가: ${changes.added.map(esc).join(', ') || '없음'}</p><p>제외: ${changes.removed.map(esc).join(', ') || '없음'}</p></details>
+        <details><summary>등록 예정 전체 차량번호</summary><p>${vehicles.map(esc).join(', ')}</p></details>
+        <button id="saveFleet" class="btn primary">이 목록으로 명부 등록</button>`;
+      $('#saveFleet').onclick = saveFleet;
+    } catch (error) {
+      if (sequence === state.fleetReadSequence && $('#fleetPreview')) $('#fleetPreview').innerHTML = `<p class="notice">${esc(error.message)}</p>`;
+    }
+  }
+
+  async function saveFleet() {
+    const preview = state.fleetPreview;
+    if (!preview) return;
+    if (!confirm(`${preview.vehicles.length}대로 보유차량 명부를 등록할까요? 제외 차량의 기존 운행자료는 보존됩니다.`)) return;
+    const button = $('#saveFleet'), input = $('#fleetFile');
+    button.disabled = true; input.disabled = true;
+    try {
+      state.fleet = await rpc('admin_fleet_replace', { p_token: token(), p_vehicles: preview.vehicles, p_source_file: preview.source, p_expected_revision: preview.revision });
+      state.fleetPreview = null;
+      if (!$('#fleetStatus')) return;
+      renderFleetStatus(); $('#fleetPreview').innerHTML = ''; input.value = '';
+      toast('명부를 등록했습니다. 수집기는 다음 조회부터 새 명부를 적용합니다.');
+      await loadLinkageStatus();
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; input.disabled = false; }
+  }
+
   async function linkagePage() {
-    $('#page').innerHTML = `<div class="card"><h3>배차·시간표·BIS·CDT 연계 확인</h3><p class="notice">선택한 운행일의 데이터가 어느 단계까지 연결되었는지 확인합니다. 차량변경 0건인 경우에도 배차·시간표·BIS 조회조건과 CDT 매칭상태를 단계별로 확인할 수 있습니다.</p><div class="toolbar"><label>운행일<input id="linkageDate" type="date" value="${todayISO()}"></label><button id="loadLinkage" class="btn primary">연계상태 조회</button></div></div><div id="linkageContent"></div>`;
-    $('#loadLinkage').onclick = loadLinkageStatus;
-    await loadLinkageStatus();
+    state.fleetReadSequence++;
+    state.fleetPreview = null;
+    $('#page').innerHTML = `${fleetCard()}<div class="card"><h3>배차·시간표·BIS·CDT 연계 확인</h3><p class="notice">선택한 운행일의 데이터가 어느 단계까지 연결되었는지 확인합니다. 차량변경 0건인 경우에도 배차·시간표·BIS 조회조건과 CDT 매칭상태를 단계별로 확인할 수 있습니다.</p><div class="toolbar"><label>운행일<input id="linkageDate" type="date" value="${todayISO()}"></label><button id="loadLinkage" class="btn primary">연계상태 조회</button></div></div><div id="linkageContent"></div>`;
+    $('#fleetFile').onchange = previewFleetFile;
+    $('#loadLinkage').onclick = () => loadLinkageStatus().catch(error => toast(error.message, true));
+    try {
+      state.fleet = await rpc('admin_fleet_get', { p_token: token() });
+      if (!$('#fleetStatus')) return;
+      renderFleetStatus(); $('#fleetFile').disabled = false;
+      await loadLinkageStatus();
+    } catch (error) {
+      if ($('#fleetStatus')) $('#fleetStatus').innerHTML = `<p class="notice">명부 조회 실패: ${esc(error.message)}<br>추가 SQL 적용 여부와 연결 상태를 확인하세요.</p>`;
+    }
   }
 
   async function loadLinkageStatus() {
     const date = $('#linkageDate').value;
-    const data = await rpc('admin_linkage_status', { p_token: token(), p_service_date: date });
+    const data = await rpc('admin_fleet_linkage_status', { p_token: token(), p_service_date: date });
+    if (!$('#linkageContent')) return;
     const c = data.counts || {};
-    $('#linkageContent').innerHTML = `<div class="pipeline-grid"><div class="pipeline-step"><span>1</span><b>배차표</b><strong>${c.dispatch || 0}건</strong><small>일일노선 ${c.route_plan || 0} · 미연결 ${c.dispatch_unlinked || 0}</small></div><div class="pipeline-step"><span>2</span><b>운행시간표</b><strong>${c.timetable || 0}슬롯</strong><small>${esc(data.day_type || '-')}</small></div><div class="pipeline-step"><span>3</span><b>BIS 실제차량</b><strong>${c.bindings || 0}연결</strong><small>변경 ${c.changes || 0}건</small></div><div class="pipeline-step"><span>4</span><b>CDT 수집</b><strong>${c.taco_imports || 0}파일</strong><small>대기 ${c.taco_pending || 0}</small></div><div class="pipeline-step"><span>5</span><b>기사 분석</b><strong>${c.driver_daily || 0}건</strong><small>매칭 ${c.taco_matched || 0}</small></div></div>
+    $('#linkageContent').innerHTML = `<p class="notice">현재 보유차량 명부 ${data.fleet?.vehicles?.length || 0}대 기준입니다. 명부 외 차량의 기존 자료는 보존됩니다. 시간표는 공통 노선 시간표입니다.</p><div class="pipeline-grid"><div class="pipeline-step"><span>1</span><b>배차표</b><strong>${c.dispatch || 0}건</strong><small>일일노선 ${c.route_plan || 0} · 미연결 ${c.dispatch_unlinked || 0}</small></div><div class="pipeline-step"><span>2</span><b>운행시간표</b><strong>${c.timetable || 0}슬롯</strong><small>${esc(data.day_type || '-')}</small></div><div class="pipeline-step"><span>3</span><b>BIS 실제차량</b><strong>${c.bindings || 0}연결</strong><small>변경 ${c.changes || 0}건</small></div><div class="pipeline-step"><span>4</span><b>CDT 수집</b><strong>${c.taco_imports || 0}파일</strong><small>대기 ${c.taco_pending || 0}</small></div><div class="pipeline-step"><span>5</span><b>기사 분석</b><strong>${c.driver_daily || 0}건</strong><small>매칭 ${c.taco_matched || 0}</small></div></div>
       <div class="card"><h3>적용 시간표</h3><p>${data.timetable_version ? `${esc(data.timetable_version.version_name)} · ${data.timetable_version.effective_from}부터 · ${esc(data.timetable_version.season_type)}` : '적용 가능한 시간표가 없습니다.'}</p></div>
       <div class="section-title"><h3>BIS 실제차량 연결</h3></div>${tableBindings(data.bindings || [])}
       <div class="section-title"><h3>CDT 수집·매칭</h3></div>${tableImports(data.imports || [])}

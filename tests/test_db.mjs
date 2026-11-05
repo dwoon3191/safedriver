@@ -1,0 +1,55 @@
+import { PGlite } from '@electric-sql/pglite';
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root = process.argv[2];
+if (!root) throw new Error('Usage: node test_db.mjs <validation-workspace with review/safedriver and upgrade/safedriver>');
+const db=new PGlite();
+await db.exec(`create role anon; create role authenticated; create schema extensions;
+create function extensions.gen_salt(text,int) returns text language sql as $$ select 'test'::text $$;
+create function extensions.crypt(text,text) returns text language sql as $$ select $1 $$;`);
+let baseline=fs.readFileSync(root+'/review/safedriver/sql/01_schema.sql','utf8');
+baseline=baseline.replace('create extension if not exists pgcrypto with schema extensions;','');
+try {await db.exec(baseline);} catch(e){console.error('BASELINE',e.message);process.exit(1);}
+const sql=fs.readFileSync(root+'/upgrade/safedriver/sql/10_company_fleet.sql','utf8');
+await db.exec(sql);
+await db.exec(sql); // repeat-safe migration
+const token='11111111-1111-4111-8111-111111111111';
+await db.exec(`insert into public.app_sessions(token,user_id) select '${token}',id from app_users where login_id='관리자';`);
+const rpc=async (name,args)=> (await db.query(`select public.${name}(${args.map((_,i)=>'$'+(i+1)).join(',')}) as result`,args)).rows[0].result;
+const a='경남71자1100', b='경남71자1101', foreign='경남71자5038';
+assert.equal((await rpc('admin_fleet_get',[token])).vehicles.length,0);
+await assert.rejects(()=>rpc('collector_get_fleet_context',[token,'2026-11-05']),/먼저 등록/);
+let fleet=await rpc('admin_fleet_replace',[token,JSON.stringify([a,b]),'test.xlsx',0]);
+assert.equal(fleet.revision,1); assert.equal(fleet.vehicles.length,2);
+await assert.rejects(()=>rpc('admin_fleet_replace',[token,'[]','test.xlsx',1]),/1~2000/);
+await assert.rejects(()=>rpc('admin_fleet_replace',[token,JSON.stringify([a,a]),'test.xlsx',1]),/중복/);
+await assert.rejects(()=>rpc('admin_fleet_replace',[token,JSON.stringify(['1100']),'test.xlsx',1]),/형식/);
+await assert.rejects(()=>rpc('admin_fleet_replace',[token,JSON.stringify([a]),'test.xlsx',0]),/다른 관리자/);
+await assert.rejects(()=>rpc('admin_fleet_get',['bad-token']));
+await db.exec(`insert into dispatch_assignments(service_date,vehicle_no,driver_name,shift_type,route_no,run_order) values
+('2026-11-05','${a}','테스트','AM','111',1),('2026-11-05','${foreign}','외부','AM','111',2);
+insert into trip_vehicle_bindings(binding_key,service_date,planned_vehicle,actual_vehicle,valid_from_at) values
+('old-foreign','2026-11-05','${a}','${foreign}',now()),('old-owned','2026-11-05','${a}','${b}',now());`);
+const context=await rpc('collector_get_fleet_context',[token,'2026-11-05']);
+assert.equal(context.dispatch.length,1);assert.equal(context.bindings.length,1);
+let view=await rpc('admin_fleet_linkage_status',[token,'2026-11-05']);
+assert.equal(view.counts.bindings,1);assert.equal(view.bindings.length,1);assert.equal(view.counts.dispatch,1);
+const change=(v,key)=>({change_key:key,service_date:'2026-11-05',route_no:'111',run_order:1,driver_name:'테스트',old_vehicle:a,new_vehicle:v,planned_vehicle:a,actual_vehicle:v,detected_at:'2026-11-05T06:00:00Z'});
+assert.equal((await rpc('collector_ingest_vehicle_changes',[token,JSON.stringify([change(foreign,'reject')])])).inserted,0);
+assert.equal((await rpc('collector_ingest_vehicle_changes',[token,JSON.stringify([change(b,'accept')])])).inserted,1);
+await assert.rejects(()=>rpc('collector_ingest_taco',[token,JSON.stringify({vehicle_no:foreign}),'[]','[]']),/명부에 없는/);
+const imp={source_file:'test.CDT',service_date:'2026-11-05',vehicle_no:a,record_count:1,sha256:'test-sha',match_status:'pending'};
+await rpc('collector_ingest_taco',[token,JSON.stringify(imp),'[]','[]']);
+assert.equal((await rpc('admin_fleet_linkage_status',[token,'2026-11-05'])).counts.taco_imports,1);
+const snapshot=await db.query(`select (select count(*) from dispatch_assignments) d,(select count(*) from trip_vehicle_bindings) b,(select count(*) from taco_imports) t`);
+fleet=await rpc('admin_fleet_replace',[token,JSON.stringify([a]),'new.xlsx',1]);
+assert.equal(fleet.revision,2);
+assert.equal((await db.query(`select active from company_fleet_vehicles where vehicle_no=$1`,[b])).rows[0].active,false);
+assert.deepEqual((await db.query(`select (select count(*) from dispatch_assignments) d,(select count(*) from trip_vehicle_bindings) b,(select count(*) from taco_imports) t`)).rows,snapshot.rows);
+view=await rpc('admin_fleet_linkage_status',[token,'2026-11-05']);assert.equal(view.counts.bindings,0);
+assert.equal((await db.query("select has_table_privilege('anon','company_fleet_vehicles','SELECT') as allowed")).rows[0].allowed,false);
+assert.equal((await db.query("select has_function_privilege('anon','public._fleet_contains(text)','EXECUTE') as allowed")).rows[0].allowed,false);
+await db.exec(fs.readFileSync(root+'/upgrade/safedriver/sql/10_company_fleet_ROLLBACK.sql','utf8'));
+assert.deepEqual((await db.query(`select (select count(*) from dispatch_assignments) d,(select count(*) from trip_vehicle_bindings) b,(select count(*) from taco_imports) t`)).rows,snapshot.rows);
+console.log('SQL PASS: migration/re-run, registration/replacement, validation/conflict/auth, filtered context/counts, BIS/CDT guards, preservation, ACL, rollback. pgcrypto substituted only for local fixtures.');
+await db.close();

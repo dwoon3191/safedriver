@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = 'DaewoonCollector-1.4.1'
+VERSION = 'DaewoonCollector-1.4.2-fleet'
 KST = timezone(timedelta(hours=9))
 DTG_EPOCH = datetime(2000, 1, 1)
 RECORD_SIZE = 128
@@ -243,10 +243,10 @@ class Supabase:
 
     def context(self, service_date: date):
         return self.rpc(
-            'collector_get_context',
+            'collector_get_fleet_context',
             {'p_token': self.token, 'p_service_date': service_date.isoformat()},
             timeout=60,
-        ) or {'dispatch': [], 'bindings': [], 'timetable': [], 'day_type': ''}
+        ) or {}
 
     def known_taco_files(self, limit=50000):
         rows = self.rpc(
@@ -1073,7 +1073,27 @@ class Tago:
         return output
 
 
-def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id):
+def fleet_vehicles(context):
+    fleet = context.get('fleet') or {}
+    vehicles = fleet.get('vehicles')
+    if not isinstance(vehicles, list) or not vehicles:
+        raise RuntimeError('보유차량 명부가 없습니다. 웹 데이터 연계에서 엑셀을 등록하세요.')
+    if any(not isinstance(v, str) or not re.fullmatch(r'[가-힣]{2}[0-9]{2,3}[가-힣][0-9]{4}', v) for v in vehicles):
+        raise RuntimeError('보유차량 명부 형식이 올바르지 않습니다.')
+    return set(vehicles)
+
+
+def infer_changes(route, expected_rows, live_rows, state, cfg, agent_id, fleet=None):
+    if not fleet:
+        raise RuntimeError('보유차량 명부 없이 BIS 차량변경을 판단할 수 없습니다.')
+    # The roster fingerprint discards old foreign-vehicle candidates/replacements.
+    fingerprint = hashlib.sha256('|'.join(sorted(fleet)).encode()).hexdigest()
+    if state.get('fleet_fingerprint') != fingerprint:
+        state['bis_routes'] = {}
+        state['fleet_fingerprint'] = fingerprint
+    expected_rows = [r for r in expected_rows if normalize_vehicle(r.get('vehicle_no')) in fleet]
+    live_rows = [dict(r, vehicle=normalize_vehicle(r.get('vehicle'))) for r in live_rows
+                 if normalize_vehicle(r.get('vehicle')) in fleet]
     today_key = datetime.now(KST).date().isoformat()
     route_state = (
         state.setdefault('bis_routes', {})
@@ -1537,7 +1557,7 @@ class Collector:
 
         try:
             with path.open('rb') as fp:
-                read_header(fp)
+                header = read_header(fp)
                 raw = fp.read(128)
                 first = decode_record(raw) if len(raw) == 128 else None
             if not first:
@@ -1545,6 +1565,11 @@ class Collector:
 
             service_date = service_date_from_filename(path, first['dt'])
             context = self.sb.context(service_date)
+            fleet = fleet_vehicles(context)
+            vehicle = normalize_vehicle(header.get('vehicle_no') or extract_vehicle(path.name))
+            if vehicle not in fleet:
+                # Do not mark processed: re-registration may make this file eligible later.
+                return
             import_info, events, summaries = analyze_cdt(path, self.cfg, context)
             import_info['collector_agent_id'] = self.agent_id
             archive_ref = write_local_analysis(
@@ -1650,6 +1675,9 @@ class Collector:
                 current = datetime.now(KST)
                 today = current.date()
                 context = self.sb.context(today)
+                fleet = fleet_vehicles(context)
+                poll_summary['fleet_count'] = len(fleet)
+                poll_summary['fleet_revision'] = context['fleet'].get('revision')
                 rows = active_dispatch_rows(
                     context.get('dispatch') or [],
                     context.get('timetable') or [],
@@ -1675,6 +1703,7 @@ class Collector:
                             self.state,
                             self.cfg,
                             self.agent_id,
+                            fleet,
                         )
                         all_changes.extend(changes)
                         poll_summary['routes'] += 1

@@ -1,0 +1,11 @@
+const assert = require('node:assert/strict');
+require('../assets/fleet.js');
+const {parse, diff} = globalThis.DaewoonFleet;
+const sheets = rows => [{name:'대운교통 차량종합',rows:[['제목'],['연번','차량번호'],...rows]}, {name:'폐차현황',rows:[['차량번호'],['경남71자9999']]}];
+assert.deepEqual(parse(sheets([[1,'경남 71자1100'],[2,'경남71자1101'],[]])), ['경남71자1100','경남71자1101']);
+assert.throws(()=>parse([{name:'폐차현황',rows:[]}]), /시트가 없습니다/);
+assert.throws(()=>parse(sheets([[1,'1100']])), /확인하세요/);
+assert.throws(()=>parse(sheets([[1,'경남71자1100'],[2,'경남71자1100']])), /중복/);
+assert.throws(()=>parse(sheets([])), /없거나/);
+assert.deepEqual(diff(['a','b'],['b','c']), {added:['c'],removed:['a']});
+console.log('Parser: 6 checks passed');
