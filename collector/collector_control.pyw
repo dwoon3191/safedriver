@@ -21,7 +21,7 @@ STATE_PATH = BASE_DIR / 'collector_state.json'
 LOG_PATH = BASE_DIR / 'collector.log'
 STOP_PATH = BASE_DIR / 'collector.stop'
 TASK_NAME = 'DaewoonSafeDriveCollector'
-CONTROL_VERSION = 'SafeDriveControl-1.3.0'
+CONTROL_VERSION = 'SafeDriveControl-1.4.1'
 
 
 def load_json(path: Path, default):

@@ -279,7 +279,7 @@
       ['dispatch', '▤ 일일 배차표'],
       ['timetable', '▦ 노선 운행시간표'],
       ['reports', '◫ 기사 운행분석'],
-      ['changes', '⇄ 차량변경'],
+      ['changes', '⇄ 실제 운행차량'],
       ['collector', '● 수집현황'],
       ['linkage', '⇆ 데이터 연계'],
       ['drivers', '♙ 기사 계정'],
@@ -313,7 +313,7 @@
       dispatch: '일일 배차표 관리',
       timetable: '노선별 운행시간표 관리',
       reports: '기사별 SafeDrive 운행분석',
-      changes: 'BIS 차량변경',
+      changes: '실제 운행차량·차량변경',
       collector: '자료수집·Collector 현황',
       linkage: '배차·BIS·CDT 데이터 연계',
       drivers: '기사 계정',
@@ -452,7 +452,7 @@
     $('#page').innerHTML = `<div class="card">
       <h3>배차표 엑셀 다중 업로드</h3>
       <p class="notice">일자별 배차표를 여러 개 동시에 선택할 수 있습니다. 파일명 <b>YYYYMMDD_배차.xls</b>에서도 운행일자를 인식하며, 시트·헤더 위치가 달라도 자동 탐색합니다.</p>
-      <div class="dropzone" id="dispatchDrop"><input id="dispatchFile" type="file" accept=".xls,.xlsx,.csv" multiple><p>기사 근무파일과 일일 노선·운행순위 파일을 함께 여러 개 선택하거나 끌어놓으세요.</p></div>
+      <p class="notice">기사 근무배차(.xls/.xlsx)와 일일 노선·운행순위(.csv/.xls/.xlsx)를 <b>개별 또는 여러 파일 동시에</b> 선택할 수 있습니다. CSV는 UTF-8과 CP949/EUC-KR을 자동 판별합니다. 업로드 순서와 관계없이 일자·차량·AM/PM 기준으로 자동 병합합니다.</p><div class="dropzone" id="dispatchDrop"><input id="dispatchFile" type="file" accept=".xls,.xlsx,.csv" multiple><p>기사 근무파일과 일일 노선·운행순위 파일을 함께 여러 개 선택하거나 끌어놓으세요.</p></div>
       <div id="dispatchPreview"></div>
     </div>
     <div class="section-title"><h3>등록된 배차</h3><div class="toolbar"><input id="dispatchDate" type="date" value="${today}"><button id="loadDispatch" class="btn secondary">조회</button></div></div>
@@ -485,7 +485,7 @@
     serviceDate: ['운행일자', '배차일자', '운행일', '일자'],
     company: ['업체명', '회사명'],
     route: ['노선명', '노선번호', '노선'],
-    order: ['운행순위', '순번', '회차'],
+    order: ['운행순위', '운행순번', '순번', '회차'],
     amDriver: ['오전승무원명', '오전기사명', '오전승무원', '오전기사'],
     pmDriver: ['오후승무원명', '오후기사명', '오후승무원', '오후기사'],
     amDeparture: ['오전출발시간', '오전출발', '오전출발시각', 'am출발시간'],
@@ -543,11 +543,28 @@
   function excelTimeToHHMM(value) {
     if (value === null || value === undefined || value === '') return null;
     if (typeof value === 'number') {
-      const minutes = Math.round((value % 1) * 1440);
-      return `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+      // Daily dispatch CSV often contains HHMM as an integer (500, 1247).
+      if (Number.isInteger(value) && value >= 0 && value <= 2359) {
+        const text = String(value).padStart(4, '0');
+        const hh = Number(text.slice(0, 2));
+        const mm = Number(text.slice(2, 4));
+        if (hh < 24 && mm < 60) return `${text.slice(0, 2)}:${text.slice(2, 4)}`;
+      }
+      // Excel time cell: fraction of a day.
+      if (value >= 0 && value < 1) {
+        const minutes = Math.round(value * 1440);
+        return `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+      }
     }
     const text = String(value).trim();
-    const match = text.match(/(\d{1,2}):(\d{2})/);
+    const compact = text.replace(/\s/g, '');
+    if (/^\d{3,4}$/.test(compact)) {
+      const hhmm = compact.padStart(4, '0');
+      const hh = Number(hhmm.slice(0, 2));
+      const mm = Number(hhmm.slice(2, 4));
+      if (hh < 24 && mm < 60) return `${hhmm.slice(0, 2)}:${hhmm.slice(2, 4)}`;
+    }
+    const match = compact.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
     return match ? `${match[1].padStart(2, '0')}:${match[2]}` : null;
   }
 
@@ -705,8 +722,47 @@
     return [...merged.values()].sort((a, b) => `${a.service_date}|${a.route_no}|${a.run_order}|${a.shift_type}`.localeCompare(`${b.service_date}|${b.route_no}|${b.run_order}|${b.shift_type}`, 'ko'));
   }
 
+  function parseCsvText(text) {
+    const rows = [];
+    let row = [], field = '', quoted = false;
+    const source = String(text || '').replace(/^\uFEFF/, '');
+    for (let i = 0; i < source.length; i++) {
+      const ch = source[i];
+      if (quoted) {
+        if (ch === '"' && source[i + 1] === '"') { field += '"'; i++; }
+        else if (ch === '"') quoted = false;
+        else field += ch;
+      } else if (ch === '"') quoted = true;
+      else if (ch === ',') { row.push(field); field = ''; }
+      else if (ch === '\n') { row.push(field.replace(/\r$/, '')); rows.push(row); row = []; field = ''; }
+      else field += ch;
+    }
+    if (field.length || row.length) { row.push(field.replace(/\r$/, '')); rows.push(row); }
+    return rows.filter(r => r.some(v => String(v).trim() !== ''));
+  }
+
+  async function readCsvFile(file) {
+    const buffer = await file.arrayBuffer();
+    let text = '';
+    const decoders = ['utf-8', 'euc-kr'];
+    let best = null;
+    for (const encoding of decoders) {
+      try {
+        const candidate = new TextDecoder(encoding, { fatal: encoding === 'utf-8' }).decode(buffer);
+        const score = (candidate.match(/[가-힣]/g) || []).length - (candidate.match(/�/g) || []).length * 20;
+        if (!best || score > best.score) best = { text: candidate, score, encoding };
+      } catch (_) {}
+    }
+    if (!best) throw new Error('CSV 문자 인코딩을 해석할 수 없습니다.');
+    text = best.text;
+    return [{ name: `CSV(${best.encoding})`, rows: parseCsvText(text) }];
+  }
+
   function readWorkbook(file) {
+    const ext = String(file.name || '').split('.').pop().toLowerCase();
+    if (ext === 'csv') return readCsvFile(file);
     return new Promise((resolve, reject) => {
+      if (typeof XLSX === 'undefined') return reject(new Error('Excel 분석 모듈을 불러오지 못했습니다.'));
       const reader = new FileReader();
       reader.onload = () => {
         try {
@@ -723,7 +779,6 @@
   }
 
   async function handleDispatchFiles(files) {
-    if (typeof XLSX === 'undefined') return toast('SheetJS를 불러오지 못했습니다. 인터넷 연결을 확인하세요.', true);
     if (!files.length) return;
     $('#dispatchPreview').innerHTML = '<div class="card empty">배차표를 분석하고 있습니다.</div>';
     const all = [];
@@ -747,41 +802,52 @@
       return;
     }
     const merged = mergeDispatchRows(all);
-    const dates = [...new Set(merged.map(row => row.service_date))].sort();
+    const routeRows = all.filter(row => row.source_format === 'DAILY_ROUTE');
+    const driverRows = all.filter(row => row.driver_name);
+    const dates = [...new Set(all.map(row => row.service_date).filter(Boolean))].sort();
+    const previewRows = merged.length ? merged : routeRows;
     $('#dispatchPreview').innerHTML = `
-      <div class="notice"><b>${files.length}개 파일 / ${dates.length}개 운행일</b>에서 원본 ${all.length}건 → 기사 기준 병합 ${merged.length}건을 인식했습니다. 기사 없는 일일 노선자료는 같은 일자·차량·AM/PM 기사자료에 보완됩니다.</div>
+      <div class="notice"><b>${files.length}개 파일 / ${dates.length}개 운행일</b>에서 기사근무 ${driverRows.length}건 · 일일 노선/순번 ${routeRows.length}건을 인식했습니다. 두 자료는 업로드 순서와 관계없이 Supabase에서 일자·차량·AM/PM 기준으로 자동 병합됩니다.</div>
       <div class="file-result-grid">${fileStatus.map(item => `<div class="file-result ${item.ok ? 'ok' : 'bad'}"><b>${esc(item.file)}</b><span>${item.ok ? `${item.count}건` : esc(item.error || '인식 실패')}</span></div>`).join('')}</div>
       <div class="date-chips">${dates.map(date => `<span>${date}</span>`).join('')}</div>
-      <div class="table-wrap"><table><thead><tr><th>일자</th><th>차량</th><th>기사</th><th>구분</th><th>노선</th><th>순번</th><th>시작</th><th>종료</th><th>원본</th></tr></thead><tbody>
-      ${merged.slice(0, 50).map(row => `<tr><td>${row.service_date}</td><td>${esc(row.vehicle_no)}</td><td>${esc(row.driver_name)}</td><td>${row.shift_type}</td><td>${esc(row.route_no)}</td><td>${row.run_order > 0 ? row.run_order : '-'}</td><td>${row.shift_start ? fmtDT(row.shift_start) : '-'}</td><td>${row.shift_end ? fmtDT(row.shift_end) : '-'}</td><td>${esc(row.source_file || '')}</td></tr>`).join('')}
+      <div class="table-wrap"><table><thead><tr><th>일자</th><th>차량</th><th>기사</th><th>구분</th><th>노선</th><th>순번</th><th>예정시작</th><th>원본</th></tr></thead><tbody>
+      ${previewRows.slice(0, 60).map(row => `<tr><td>${row.service_date}</td><td>${esc(row.vehicle_no)}</td><td>${esc(row.driver_name || '-')}</td><td>${row.shift_type}</td><td>${esc(row.route_no || '-')}</td><td>${row.run_order > 0 ? row.run_order : '-'}</td><td>${row.shift_start ? fmtDT(row.shift_start) : '-'}</td><td>${esc(row.source_file || '')}</td></tr>`).join('')}
       </tbody></table></div>
-      <button id="saveDispatch" class="btn primary" style="margin-top:12px">Supabase에 ${merged.length}건 저장</button>`;
+      <button id="saveDispatch" class="btn primary" style="margin-top:12px">기사근무·일일노선 ${all.length}건 저장/병합</button>`;
 
     $('#saveDispatch').onclick = async () => {
       const button = $('#saveDispatch');
       const batchSize = 75;
       let saved = 0;
+      let routeSaved = 0;
       try {
         button.disabled = true;
-        for (let index = 0; index < merged.length; index += batchSize) {
-          const part = merged.slice(index, index + batchSize);
+        for (let index = 0; index < all.length; index += batchSize) {
+          const part = all.slice(index, index + batchSize);
           const sourceFiles = [...new Set(part.map(row => row.source_file).filter(Boolean))].join(', ');
-          button.textContent = `저장 중 ${Math.min(index + part.length, merged.length)}/${merged.length}`;
-          const result = await rpc('admin_import_dispatch', {
-            p_token: token(),
-            p_rows: part,
-            p_source_file: `${sourceFiles} [${Math.floor(index / batchSize) + 1}/${Math.ceil(merged.length / batchSize)}]`,
-          });
-          saved += Number(result?.rows || 0);
+          button.textContent = `저장 중 ${Math.min(index + part.length, all.length)}/${all.length}`;
+          let result;
+          try {
+            result = await rpc('admin_import_dispatch_bundle', {
+              p_token: token(), p_rows: part,
+              p_source_file: `${sourceFiles} [${Math.floor(index / batchSize) + 1}/${Math.ceil(all.length / batchSize)}]`,
+            });
+          } catch (error) {
+            if (!/admin_import_dispatch_bundle|does not exist|schema cache/i.test(error.message || '')) throw error;
+            const legacyRows = mergeDispatchRows(part);
+            result = await rpc('admin_import_dispatch', { p_token: token(), p_rows: legacyRows, p_source_file: sourceFiles });
+          }
+          saved += Number(result?.rows || result?.dispatch_rows || 0);
+          routeSaved += Number(result?.route_rows || 0);
         }
-        toast(`${saved}건을 저장했습니다.`);
+        toast(`기사배차 ${saved}건 · 일일 노선/순번 ${routeSaved}건을 저장·병합했습니다.`);
         if (dates[0] && $('#dispatchDate')) $('#dispatchDate').value = dates[0];
-        button.textContent = `저장 완료 ${saved}건`;
+        button.textContent = `저장 완료`;
         await loadDispatchList();
       } catch (error) {
         button.disabled = false;
-        button.textContent = `다시 저장 (${saved}/${merged.length} 처리)`;
-        toast(`${saved}건 처리 후 오류: ${error.message}`, true);
+        button.textContent = `다시 저장`;
+        toast(`저장 오류: ${error.message}`, true);
       }
     };
   }
@@ -789,8 +855,20 @@
   async function loadDispatchList() {
     const serviceDate = $('#dispatchDate')?.value;
     if (!serviceDate) return;
-    const rows = await rpc('admin_list_dispatch', { p_token: token(), p_service_date: serviceDate });
-    $('#dispatchList').innerHTML = rows.length ? `<div class="table-wrap"><table><thead><tr><th>차량</th><th>기사</th><th>구분</th><th>노선</th><th>순번</th><th>시작</th><th>종료</th><th>원본</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.vehicle_no)}</td><td>${esc(row.driver_name)}</td><td>${row.shift_type}</td><td>${esc(row.route_no)}</td><td>${row.run_order > 0 ? row.run_order : '-'}</td><td>${row.shift_start ? fmtDT(row.shift_start) : '-'}</td><td>${row.shift_end ? fmtDT(row.shift_end) : '-'}</td><td>${esc(row.source_file || row.source_format || '')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="card empty">해당 날짜 배차가 없습니다.</div>';
+    let data;
+    try {
+      data = await rpc('admin_list_dispatch_bundle', { p_token: token(), p_service_date: serviceDate });
+    } catch (error) {
+      if (!/admin_list_dispatch_bundle|does not exist|schema cache/i.test(error.message || '')) throw error;
+      const rows = await rpc('admin_list_dispatch', { p_token: token(), p_service_date: serviceDate });
+      data = { dispatch: rows || [], route_plan: [] };
+    }
+    const rows = data.dispatch || [];
+    const routePlan = data.route_plan || [];
+    $('#dispatchList').innerHTML = `
+      <div class="notice"><b>${serviceDate}</b> 기사배차 ${rows.length}건 · 일일 노선/순번 ${routePlan.length}건. 노선·순번이 비어 있으면 같은 날짜·차량·AM/PM 일일노선 자료를 확인하세요.</div>
+      ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>차량</th><th>기사</th><th>구분</th><th>노선</th><th>순번</th><th>시작</th><th>종료</th><th>원본</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.vehicle_no)}</td><td>${esc(row.driver_name)}</td><td>${row.shift_type}</td><td>${esc(row.route_no || '-')}</td><td>${row.run_order > 0 ? row.run_order : '-'}</td><td>${row.shift_start ? fmtDT(row.shift_start) : '-'}</td><td>${row.shift_end ? fmtDT(row.shift_end) : '-'}</td><td>${esc(row.source_file || row.source_format || '')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="card empty">기사 근무배차가 없습니다.</div>'}
+      <details class="card" style="margin-top:12px"><summary><b>일일 노선·운행순위 ${routePlan.length}건 보기</b></summary>${routePlan.length ? `<div class="table-wrap"><table><thead><tr><th>차량</th><th>구분</th><th>노선</th><th>순번</th><th>예정출발</th><th>원본</th></tr></thead><tbody>${routePlan.map(row => `<tr><td>${esc(row.vehicle_no)}</td><td>${esc(row.shift_type)}</td><td>${esc(row.route_no)}</td><td>${row.run_order}</td><td>${row.planned_departure ? fmtDT(row.planned_departure) : '-'}</td><td>${esc(row.source_file || '')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">일일 노선·운행순위 자료가 없습니다.</div>'}</details>`;
   }
 
 
@@ -881,34 +959,23 @@
   async function timetablePage() {
     $('#page').innerHTML = `<div class="card">
       <h3>노선별·운행순위별 운행시간표 업로드</h3>
-      <p class="notice">평일·토요일·일/공휴일 시간표가 포함된 Excel을 개별 또는 여러 개 선택할 수 있습니다. 변경 시행일을 기준으로 버전을 보관하며, 방학 시간표는 <b>방학</b> 구분으로 등록합니다.</p>
-      <div class="form-grid">
-        <label>시간표 구분<select id="ttSeason"><option value="NORMAL">일반</option><option value="VACATION">방학</option><option value="SPECIAL">임시/특별</option></select></label>
-        <label>적용 종료일(선택)<input id="ttEndDate" type="date"></label>
-      </div>
-      <div class="dropzone"><input id="timetableFile" type="file" accept=".xls,.xlsx" multiple><p>노선별 운행시간표 파일을 선택하세요.</p></div>
+      <p class="notice">시간표 Excel에는 모든 노선·운행순위의 평일/토요일/일·공휴일 운행시간이 포함됩니다. <b>새 시간표를 다시 업로드하기 전까지 가장 최근 시간표를 계속 적용</b>합니다. 일일 배차 CSV의 노선·순번·예정출발을 우선 사용하므로 날짜별 휴일을 별도로 입력하지 않습니다.</p>
+      <div class="dropzone"><input id="timetableFile" type="file" accept=".xls,.xlsx" multiple><p>변경된 노선별 운행시간표 파일을 선택하세요. 새 버전 등록 시 이전 버전의 적용 종료일은 자동으로 정리됩니다.</p></div>
       <div id="timetablePreview"></div>
     </div>
     <div class="section-title"><h3>등록된 시간표 버전</h3><button id="refreshTimetable" class="btn secondary">새로고침</button></div>
-    <div id="timetableHistory"></div>
-    <div class="section-title"><h3>공휴일·특수 운행일 지정</h3></div>
-    <div class="card"><div class="form-grid">
-      <label>적용일<input id="calendarDate" type="date"></label>
-      <label>운행일 유형<select id="calendarType"><option value="HOLIDAY">일·공휴일</option><option value="SATURDAY">토요일</option><option value="WEEKDAY">평일</option></select></label>
-      <label class="span-2">비고<input id="calendarNote" placeholder="예: 설날, 임시공휴일, 대체공휴일"></label>
-    </div><button id="saveCalendar" class="btn primary">운행일 유형 저장</button></div>
-    <div id="calendarHistory" style="margin-top:12px"></div>`;
+    <div id="timetableHistory"></div>`;
     $('#timetableFile').onchange = () => handleTimetableFiles([...$('#timetableFile').files]);
-    $('#refreshTimetable').onclick = async () => { await loadTimetableHistory(); await loadCalendarHistory(); };
-    $('#saveCalendar').onclick = saveCalendarOverride;
-    await Promise.all([loadTimetableHistory(), loadCalendarHistory()]);
+    $('#refreshTimetable').onclick = loadTimetableHistory;
+    await loadTimetableHistory();
   }
+
 
   async function handleTimetableFiles(files) {
     if (!files.length) return;
     if (typeof XLSX === 'undefined') return toast('SheetJS를 불러오지 못했습니다.', true);
-    const seasonType = $('#ttSeason').value;
-    const effectiveTo = $('#ttEndDate').value || null;
+    const seasonType = 'NORMAL';
+    const effectiveTo = null;
     const packages = [];
     const errors = [];
     for (const file of files) {
@@ -1064,7 +1131,7 @@
   // ---------- BIS changes ----------
   async function changesPage() {
     const today = todayISO();
-    $('#page').innerHTML = `<div class="card"><h3>BIS 차량변경 실시간 감시</h3><p class="notice">Collector가 배차표 예정차량과 TAGO 실시간 운행차량을 ${30}초 단위로 비교합니다. 전체 위치는 저장하지 않고, 반복 확인된 차량변경 이벤트만 Supabase에 저장합니다.</p><div class="toolbar"><input id="changeDate" type="date" value="${today}"><button id="loadChanges" class="btn secondary">조회</button></div><div id="bisStatus"></div></div><div class="section-title"><h3>차량변경 이력</h3></div><div id="changeList"></div>`;
+    $('#page').innerHTML = `<div class="card"><h3>실제 운행차량·차량변경 실시간 감시</h3><p class="notice">Collector가 일일배차의 예정차량과 TAGO/BIS 실제 운행차량을 비교합니다. <b>배차표와 다른 차량은 출발대체 또는 운행중교체로 모두 이력화</b>하며, 전체 BIS 위치는 저장하지 않습니다.</p><div class="toolbar"><input id="changeDate" type="date" value="${today}"><button id="loadChanges" class="btn secondary">조회</button></div><div id="bisStatus"></div></div><div class="section-title"><h3>기사별 예정차량 ↔ 실제차량 이력</h3></div><div id="changeList"></div>`;
     $('#loadChanges').onclick = loadChanges;
     await loadChanges();
   }
@@ -1103,7 +1170,7 @@
       <div class="section-title"><h3>Collector 상태</h3><button id="refreshCollector" class="btn secondary">새로고침</button></div>
       ${agents.length ? agents.map(agent => `<div class="card collector-agent"><div class="agent-head"><div><b>${esc(agent.agent_id)}</b><small>${esc(agent.host_name || '')} · ${esc(agent.version || '')}</small></div>${badge(agent.online ? 'ONLINE' : agent.status || 'OFFLINE')}</div>
       <div class="grid cols-4 compact-metrics"><div class="metric"><span class="label">마지막 Heartbeat</span><span class="value mini">${fmtDT(agent.last_heartbeat_at)}</span></div><div class="metric"><span class="label">CDT 검색</span><span class="value mini">${agent.last_taco_scan_at ? fmtDT(agent.last_taco_scan_at) : '-'}</span></div><div class="metric"><span class="label">BIS 조회</span><span class="value mini">${agent.last_bis_poll_at ? fmtDT(agent.last_bis_poll_at) : '-'}</span></div><div class="metric"><span class="label">매칭 대기</span><span class="value">${agent.counters?.pending_cdt || 0}</span></div></div>
-      <div class="agent-counters">CDT 처리 ${agent.counters?.taco_files || 0}파일 · 대표이벤트 ${agent.counters?.taco_events || 0}건 · BIS 조회 ${agent.counters?.bis_polls || 0}회 · 실제차량 연결 ${agent.counters?.bis_changes || 0}건</div>
+      <div class="agent-counters">폴더 내 CDT ${agent.counters?.taco_discovered || 0}개 · DB확인 ${agent.counters?.taco_db_known || 0}개 · 신규/재처리 후보 ${agent.counters?.taco_new_candidates || 0}개 · 이번 실행 처리 ${agent.counters?.taco_files || 0}파일 · 매칭대기 ${agent.counters?.pending_cdt || 0}건 · BIS 감시 ${agent.counters?.bis_polls || 0}회 · 실제차량 연결 ${agent.counters?.bis_changes || 0}건</div>
       ${agent.counters?.last_bis_summary ? `<div class="notice"><b>최근 BIS 비교:</b> 활성노선 ${agent.counters.last_bis_summary.routes || 0}개 · 예정차량 ${agent.counters.last_bis_summary.expected || 0}대 · 실제차량 ${agent.counters.last_bis_summary.live || 0}대 · 불일치 후보 ${agent.counters.last_bis_summary.mismatches || 0}쌍 · 확정 ${agent.counters.last_bis_summary.changes || 0}건</div>` : ''}
       ${(agent.counters?.last_bis_summary?.route_details || []).length ? `<div class="table-wrap compact-table"><table><thead><tr><th>노선</th><th>예정</th><th>실제</th><th>미확인 예정차량</th><th>예상외 실제차량</th><th>후보</th><th>오류</th></tr></thead><tbody>${agent.counters.last_bis_summary.route_details.map(r => `<tr><td><b>${esc(r.route)}</b></td><td>${r.expected || 0}</td><td>${r.live || 0}</td><td>${esc((r.missing_vehicles || []).join(', ') || '-')}</td><td>${esc((r.unexpected_vehicles || []).join(', ') || '-')}</td><td>${r.pairs || 0}</td><td>${esc(r.error || '')}</td></tr>`).join('')}</tbody></table></div>` : ''}
       ${agent.last_error ? `<div class="notice warn">최근 오류: ${esc(agent.last_error)}</div>` : ''}
@@ -1136,7 +1203,7 @@
     const date = $('#linkageDate').value;
     const data = await rpc('admin_linkage_status', { p_token: token(), p_service_date: date });
     const c = data.counts || {};
-    $('#linkageContent').innerHTML = `<div class="pipeline-grid"><div class="pipeline-step"><span>1</span><b>배차표</b><strong>${c.dispatch || 0}건</strong><small>기사·예정차량</small></div><div class="pipeline-step"><span>2</span><b>운행시간표</b><strong>${c.timetable || 0}슬롯</strong><small>${esc(data.day_type || '-')}</small></div><div class="pipeline-step"><span>3</span><b>BIS 실제차량</b><strong>${c.bindings || 0}연결</strong><small>변경 ${c.changes || 0}건</small></div><div class="pipeline-step"><span>4</span><b>CDT 수집</b><strong>${c.taco_imports || 0}파일</strong><small>대기 ${c.taco_pending || 0}</small></div><div class="pipeline-step"><span>5</span><b>기사 분석</b><strong>${c.driver_daily || 0}건</strong><small>매칭 ${c.taco_matched || 0}</small></div></div>
+    $('#linkageContent').innerHTML = `<div class="pipeline-grid"><div class="pipeline-step"><span>1</span><b>배차표</b><strong>${c.dispatch || 0}건</strong><small>일일노선 ${c.route_plan || 0} · 미연결 ${c.dispatch_unlinked || 0}</small></div><div class="pipeline-step"><span>2</span><b>운행시간표</b><strong>${c.timetable || 0}슬롯</strong><small>${esc(data.day_type || '-')}</small></div><div class="pipeline-step"><span>3</span><b>BIS 실제차량</b><strong>${c.bindings || 0}연결</strong><small>변경 ${c.changes || 0}건</small></div><div class="pipeline-step"><span>4</span><b>CDT 수집</b><strong>${c.taco_imports || 0}파일</strong><small>대기 ${c.taco_pending || 0}</small></div><div class="pipeline-step"><span>5</span><b>기사 분석</b><strong>${c.driver_daily || 0}건</strong><small>매칭 ${c.taco_matched || 0}</small></div></div>
       <div class="card"><h3>적용 시간표</h3><p>${data.timetable_version ? `${esc(data.timetable_version.version_name)} · ${data.timetable_version.effective_from}부터 · ${esc(data.timetable_version.season_type)}` : '적용 가능한 시간표가 없습니다.'}</p></div>
       <div class="section-title"><h3>BIS 실제차량 연결</h3></div>${tableBindings(data.bindings || [])}
       <div class="section-title"><h3>CDT 수집·매칭</h3></div>${tableImports(data.imports || [])}
@@ -1145,7 +1212,7 @@
   }
 
   function tableBindings(rows) {
-    if (!rows?.length) return '<div class="card empty">BIS로 확정된 실제차량 연결이 없습니다. Collector의 최근 BIS 비교표에서 예정/실제 차량과 오류를 확인하세요.</div>';
+    if (!rows?.length) return '<div class="card empty">BIS로 확정된 실제차량 연결이 없습니다. 먼저 일일배차의 노선·순번이 연결되었는지 확인한 뒤 Collector의 예정차량/실제차량 비교를 확인하세요.</div>';
     return `<div class="table-wrap"><table><thead><tr><th>노선</th><th>순번</th><th>기사</th><th>예정차량</th><th>실제차량</th><th>유효시작</th><th>유효종료</th><th>유형</th><th>신뢰도</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.route_no)}</td><td>${r.run_order > 0 ? r.run_order : '-'}</td><td>${esc(r.driver_name)}</td><td>${esc(r.planned_vehicle)}</td><td><b>${esc(r.actual_vehicle)}</b></td><td>${fmtDT(r.valid_from_at)}</td><td>${r.valid_to_at ? fmtDT(r.valid_to_at) : '-'}</td><td>${esc(r.binding_type)}</td><td>${badge(r.confidence)}</td></tr>`).join('')}</tbody></table></div>`;
   }
 

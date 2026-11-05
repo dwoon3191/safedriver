@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = 'DaewoonCollector-1.3.0'
+VERSION = 'DaewoonCollector-1.4.1'
 KST = timezone(timedelta(hours=9))
 DTG_EPOCH = datetime(2000, 1, 1)
 RECORD_SIZE = 128
@@ -83,6 +83,10 @@ _RUNTIME = {
         'bis_polls': 0,
         'bis_changes': 0,
         'pending_cdt': 0,
+        'taco_discovered': 0,
+        'taco_state_processed': 0,
+        'taco_db_known': 0,
+        'taco_new_candidates': 0,
         'errors': 0,
     },
     'config_summary': {},
@@ -243,6 +247,14 @@ class Supabase:
             {'p_token': self.token, 'p_service_date': service_date.isoformat()},
             timeout=60,
         ) or {'dispatch': [], 'bindings': [], 'timetable': [], 'day_type': ''}
+
+    def known_taco_files(self, limit=50000):
+        rows = self.rpc(
+            'collector_known_taco_files',
+            {'p_token': self.token, 'p_limit': int(limit)},
+            timeout=60,
+        ) or []
+        return {str(x) for x in rows if x}
 
     def cleanup_storage(self):
         return self.rpc(
@@ -483,6 +495,18 @@ def active_dispatch_rows(rows, timetable=None, current_time=None, trip_window_mi
             if shift_type == 'PM' and current_time.hour < 10:
                 continue
 
+        assignment = dict(assignment)
+        planned = parse_dt(assignment.get('planned_departure'))
+        if planned:
+            # Daily route plan is the strongest source for the specific service day.
+            age_minutes = (current_time - planned).total_seconds() / 60
+            future_minutes = (planned - current_time).total_seconds() / 60
+            if not (0 <= age_minutes <= trip_window_minutes or 0 < future_minutes <= 20):
+                continue
+            assignment['_scheduled_departure'] = planned.isoformat()
+            output.append(assignment)
+            continue
+
         route = str(assignment.get('route_no') or '').strip()
         order = int(assignment.get('run_order') or -1)
         slots = schedule_map.get((route, order), [])
@@ -500,7 +524,6 @@ def active_dispatch_rows(rows, timetable=None, current_time=None, trip_window_mi
             selected = max(recent) if recent else (min(upcoming) if upcoming else None)
             if selected is None:
                 continue
-            assignment = dict(assignment)
             assignment['_scheduled_departure'] = selected.isoformat()
         output.append(assignment)
     return output
@@ -510,29 +533,7 @@ def resolve_assignment(recorded_at, vehicle, dispatch, bindings):
     current = recorded_at.replace(tzinfo=KST)
     vehicle_norm = normalize_vehicle(vehicle)
 
-    direct = []
-    for assignment in dispatch:
-        if normalize_vehicle(assignment.get('vehicle_no')) != vehicle_norm:
-            continue
-        start = parse_dt(assignment.get('shift_start'))
-        end = parse_dt(assignment.get('shift_end'))
-        if start and end and start <= current <= end:
-            direct.append(assignment)
-        elif not start or not end:
-            shift_type = str(assignment.get('shift_type') or '').upper()
-            if (shift_type == 'AM' and current.hour < 14) or (
-                shift_type == 'PM' and current.hour >= 10
-            ) or shift_type not in ('AM', 'PM'):
-                direct.append(assignment)
-    if direct:
-        return sorted(
-            direct,
-            key=lambda item: (
-                0 if item.get('shift_start') else 1,
-                int(item.get('run_order') or 9999),
-            ),
-        )[0]
-
+    # Confirmed BIS actual-vehicle bindings have priority over the planned vehicle.
     matched_bindings = []
     for binding in bindings or []:
         if normalize_vehicle(
@@ -570,6 +571,29 @@ def resolve_assignment(recorded_at, vehicle, dispatch, bindings):
             or binding.get('old_vehicle'),
             'shift_type': 'ACTUAL_VEHICLE',
         }
+
+    direct = []
+    for assignment in dispatch:
+        if normalize_vehicle(assignment.get('vehicle_no')) != vehicle_norm:
+            continue
+        start = parse_dt(assignment.get('shift_start'))
+        end = parse_dt(assignment.get('shift_end'))
+        if start and end and start <= current <= end:
+            direct.append(assignment)
+        elif not start or not end:
+            shift_type = str(assignment.get('shift_type') or '').upper()
+            if (shift_type == 'AM' and current.hour < 14) or (
+                shift_type == 'PM' and current.hour >= 10
+            ) or shift_type not in ('AM', 'PM'):
+                direct.append(assignment)
+    if direct:
+        return sorted(
+            direct,
+            key=lambda item: (
+                0 if item.get('shift_start') else 1,
+                int(item.get('run_order') or 9999),
+            ),
+        )[0]
 
     candidates = [
         assignment
@@ -1255,6 +1279,8 @@ class Collector:
         self.state.setdefault('processed', {})
         self.state.setdefault('pending_cdt', {})
         self.state.setdefault('bis_routes', {})
+        self.db_known_taco_files = set()
+        self.db_known_refreshed_at = None
         self.stop_event = threading.Event()
         self.restart_requested = False
         self.tago = Tago(cfg)
@@ -1434,18 +1460,52 @@ class Collector:
         except Exception as exc:
             log(f'자동 재시작 실패: {exc}', level='error')
 
+    def refresh_known_taco_files(self, force=False):
+        now = datetime.now(KST)
+        if (
+            not force
+            and self.db_known_refreshed_at
+            and (now - self.db_known_refreshed_at).total_seconds() < 600
+        ):
+            return
+        try:
+            self.db_known_taco_files = self.sb.known_taco_files(50000)
+            self.db_known_refreshed_at = now
+            _RUNTIME['counters']['taco_db_known'] = len(self.db_known_taco_files)
+        except Exception as exc:
+            log(f'CDT DB 처리목록 조회 경고: {exc}', level='error')
+
     def taco_loop(self):
         folder = Path(self.cfg.get('taco_folder', DEFAULT_CONFIG['taco_folder']))
-        log(f'타코/CDT 폴더 감시: {folder}')
+        log(f'타코/CDT 폴더 감시(하위폴더 포함): {folder}')
+        self.refresh_known_taco_files(force=True)
         while not self.stop_event.is_set():
             _RUNTIME['last_taco_scan_at'] = now_iso()
             try:
                 if folder.exists():
-                    for path in sorted(folder.glob('*')):
+                    self.refresh_known_taco_files()
+                    paths = sorted(
+                        (p for p in folder.rglob('*') if p.is_file() and p.suffix.upper() == '.CDT'),
+                        key=lambda p: str(p).lower(),
+                    )
+                    _RUNTIME['counters']['taco_discovered'] = len(paths)
+                    state_processed = 0
+                    new_candidates = 0
+                    for path in paths:
                         if self.stop_event.is_set():
                             break
-                        if path.is_file() and path.suffix.upper() == '.CDT':
-                            self.process_cdt(path)
+                        key = str(path.resolve())
+                        stat = path.stat()
+                        signature = f'{stat.st_size}:{int(stat.st_mtime)}'
+                        already_state = self.state.setdefault('processed', {}).get(key) == signature
+                        already_db = path.name in self.db_known_taco_files
+                        if already_state and already_db:
+                            state_processed += 1
+                        else:
+                            new_candidates += 1
+                        self.process_cdt(path)
+                    _RUNTIME['counters']['taco_state_processed'] = state_processed
+                    _RUNTIME['counters']['taco_new_candidates'] = new_candidates
                 else:
                     log(f'경고: 타코 폴더가 없습니다: {folder}', level='error')
             except Exception as exc:
@@ -1458,7 +1518,9 @@ class Collector:
         stat = path.stat()
         signature = f'{stat.st_size}:{int(stat.st_mtime)}'
         if self.state.setdefault('processed', {}).get(key) == signature:
-            return
+            if path.name in self.db_known_taco_files:
+                return
+            log(f'CDT 상태/DB 불일치 재처리: {path.name}')
 
         pending = self.state.setdefault('pending_cdt', {}).get(key)
         if pending and pending.get('signature') == signature:
@@ -1490,6 +1552,8 @@ class Collector:
             )
             import_info['local_archive_ref'] = archive_ref
             result = self.sb.ingest_taco(import_info, events, summaries)
+            self.db_known_taco_files.add(path.name)
+            _RUNTIME['counters']['taco_db_known'] = len(self.db_known_taco_files)
 
             status = import_info.get('match_status', 'pending')
             message = (
