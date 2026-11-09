@@ -278,23 +278,12 @@
 
   function buildNav() {
     const admin = [
-      ['dashboard', '▦ 대시보드'],
-      ['dispatch', '▤ 일일 배차표'],
-      ['timetable', '▦ 노선 운행시간표'],
-      ['reports', '◫ 기사 운행분석'],
-      ['changes', '⇄ 실제 운행차량'],
-      ['collector', '● 수집현황'],
-      ['linkage', '⇆ 데이터 연계'],
-      ['drivers', '♙ 기사 계정'],
-      ['acks', '✓ 확인현황'],
-      ['audit', '◷ 작업이력'],
-      ['settings', '⚙ 설정/설치'],
+      ['dashboard', '▦ 월별 종합진단표'], ['collector', '● 수집·등록'],
+      ['drivers', '♙ 기사 계정'], ['feedback', '◫ 피드백·지도'],
+      ['acks', '✓ 확인현황'], ['audit', '◷ 작업이력'],
+      ['dispatch', '▤ 기존 배차표'], ['timetable', '▦ 기존 시간표'], ['settings', '⚙ 설정']
     ];
-    const driver = [
-      ['dashboard', '▦ 나의 운행분석'],
-      ['history', '▤ 운행이력'],
-      ['settings', '⚙ 비밀번호/정보'],
-    ];
+    const driver = [['dashboard', '▦ 내 종합진단표'], ['feedback', '◫ 관리자와 대화'], ['settings', '⚙ 비밀번호/정보']];
     $('#nav').innerHTML = (state.session.role === 'admin' ? admin : driver)
       .map(([id, title]) => `<button class="nav-btn" data-page="${id}">${title}</button>`)
       .join('');
@@ -326,8 +315,10 @@
       settings: '설정',
     };
     $('#pageTitle').textContent = titles[page] || page;
-    $('#pageSubtitle').textContent = '대운교통 SafeDrive AI · 배차 / 운행시간표 / BIS / CDT 기반 기사 피드백';
+    $('#pageSubtitle').textContent = '대운교통 · 공단 월별 종합진단표 · 피드백';
     $('#topActions').innerHTML = '';
+    const monthlyTitles={dashboard:'월별 종합진단표',collector:'공단 보고서 수집·등록',drivers:'기사 계정·공단 연결',feedback:'피드백·지도 이력',acks:'월별 확인현황'};
+    if(monthlyTitles[page]) $('#pageTitle').textContent=monthlyTitles[page];
     renderPage(page).catch(error => {
       $('#page').innerHTML = `<div class="notice warn">${esc(error.message)}</div>`;
       toast(error.message, true);
@@ -336,6 +327,11 @@
   window.appGo = navigate;
 
   async function renderPage(page) {
+    if(['dashboard','reports','history','collector','drivers','feedback','acks'].includes(page)) {
+      return window.MonthlyReports.render(page,{state,token,rpc,toast,openModal,closeModal});
+    }
+    if(['changes','linkage'].includes(page)) { $('#page').innerHTML='<div class="card">BIS/CDT 자동 분석은 새 메뉴에서 제외되었습니다. 기존 자료는 보존됩니다.</div>';return; }
+
     if (state.session.role === 'admin') {
       if (page === 'dashboard') return adminDashboard();
       if (page === 'dispatch') return dispatchPage();
@@ -359,12 +355,13 @@
     openModal(`<h2>첫 로그인 비밀번호 변경</h2>
       <p class="notice warn">초기 비밀번호 1111은 계속 사용할 수 없습니다.</p>
       <div class="form-grid">
-        <label>현재 비밀번호<input id="oldpw" type="password" value="1111"></label>
+        <label>현재 비밀번호<input id="oldpw" type="password" autocomplete="current-password"></label>
         <label>새 비밀번호<input id="newpw" type="password" placeholder="6자 이상"></label>
         <label class="span-2">새 비밀번호 확인<input id="newpw2" type="password"></label>
       </div>
       <button id="changePwBtn" class="btn primary full">비밀번호 변경</button>`);
     $('#modalClose').classList.add('hidden');
+    $('#oldpw').value = $('#loginPw').value || '';
     $('#changePwBtn').onclick = async () => {
       const first = $('#newpw').value;
       const second = $('#newpw2').value;
@@ -379,6 +376,7 @@
         saveSession(state.session);
         closeModal();
         toast('비밀번호를 변경했습니다.');
+        navigate('dashboard');
       } catch (error) {
         toast(error.message, true);
       }
@@ -1351,7 +1349,7 @@
     $('#page').innerHTML = `<div class="grid cols-2">
       <div class="card"><h3>비밀번호 변경</h3><div class="form-grid"><label>현재 비밀번호<input id="spOld" type="password"></label><label>새 비밀번호<input id="spNew" type="password"></label></div><button id="spBtn" class="btn primary">변경</button></div>
       ${state.session.role === 'admin' ? `<div class="card"><h3>Supabase 연결</h3><p class="small muted">관리자 설치 단계에서만 등록합니다. 기사 계정에는 이 메뉴가 표시되지 않습니다.</p><label>URL<input id="cfgUrl" value="${esc(state.cfg.url)}"></label><label>anon/publishable key<textarea id="cfgKey" rows="3">${esc(state.cfg.key)}</textarea></label><div class="toolbar"><button id="cfgBtn" class="btn secondary">현재 브라우저 저장</button><button id="cfgDownloadBtn" class="btn primary">배포용 config.js 생성</button></div><p class="small muted">생성한 config.js를 웹앱 루트에 1회 배포하면 기사 휴대전화에서는 URL/key 입력 없이 로그인합니다. 업데이트 ZIP은 config.js를 제외하여 운영값을 보존합니다.</p></div>
-      <div class="card span-2"><h3>백그라운드 Collector</h3><ol class="install-steps"><li><code>collector/SafeDrive_Collector_Control.bat</code>만 실행</li><li>제어센터의 <b>환경 설정</b>에서 Supabase·TAGO·CDT 폴더 등록</li><li><b>연결 진단</b> 후 <b>자동실행 설치</b> 및 <b>수집 시작</b></li></ol><div class="code-note">CDT 자동수집: E:\\Choyoung\\ADTviewer\\Data (입고·수리로 며칠 늦게 들어와도 운행일 기준 재매칭)<br>BIS: 국토교통부 TAGO 실시간 조회 - 전체 위치는 미저장<br>Supabase: 배차·시간표·차량변경·기사별 집계·대표 이벤트만 저장<br>Collector 제어창을 닫아도 수집은 계속되며 설정/처리이력은 리셋되지 않음</div></div>` : ''}</div>`;
+      <div class="card span-2"><h3>공단 보고서 수집</h3><p>PC에서 collector/공단수집기_실행.bat을 실행합니다. 기존 BIS/CDT 수집기는 전환 완료 후 중지하고 자동실행을 해제하세요.</p><p>휴대폰에서는 사이트를 연 뒤 브라우저 메뉴의 홈 화면 추가 기능을 사용하세요. 메뉴 명칭은 기기에 따라 다릅니다.</p><p>문자 발송은 보류 상태입니다. 엑셀 원본은 향후 기간별 분석에 사용합니다.</p></div>` : ''}</div>`;
     $('#spBtn').onclick = async () => {
       try { await rpc('app_change_password', { p_token: token(), p_old_password: $('#spOld').value, p_new_password: $('#spNew').value }); toast('비밀번호를 변경했습니다.'); } catch (error) { toast(error.message, true); }
     };

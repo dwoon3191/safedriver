@@ -1,1 +1,2 @@
-1.4.2-fleet
+2.0.0-rc1 Monthly Reports
+Release candidate: existing v1.4.x additive patch; eTAS live acceptance test required.
