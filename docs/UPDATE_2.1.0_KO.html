@@ -1,0 +1,31 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SafeDrive v2.1.0 업데이트 안내</title>
+<style>body{font-family:"Malgun Gothic",sans-serif;background:#eef3f7;color:#213247;line-height:1.8;margin:0}main{max-width:900px;margin:30px auto;background:#fff;padding:36px;border-radius:14px}h1{color:#0b3554}h2{color:#125e7d;border-bottom:2px solid #dce8ee;padding-bottom:6px;margin-top:36px}code{background:#edf2f5;padding:2px 5px}table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border:1px solid #cedbe3;padding:9px;text-align:left;vertical-align:top}th{background:#eaf2f7}.warn{background:#fff4db;border-left:5px solid #cc962c;padding:14px 18px}li{margin:6px 0}</style></head><body><main>
+<h1>SafeDrive v2.1.0 업데이트 안내</h1><p>v2.0.0-rc1 위에 덮어쓰는 업데이트입니다. 2026-11-19 작성.</p>
+<div class="warn"><b>먼저 확인하세요.</b><br>이 업데이트는 운영 사이트와 데이터베이스에 자동 적용되지 않습니다. 이 ZIP을 만든 환경에서는 Supabase(SQL)와 실제 휴대폰 화면을 실행해 보지 못했습니다. 아래 "시험 확인표"를 시험용 계정으로 먼저 확인한 뒤 사용하세요. config.js, app.css, 이미지, netlify.toml은 이 ZIP에 없으며 바꾸지 않습니다.</div>
+<h2>무엇이 바뀌나요</h2>
+<table><tr><th>구분</th><th>변경</th></tr>
+<tr><td>기사 화면 이름</td><td>"내 종합진단표" → <b>운행습관 리포트</b>, "관리자와 대화" → <b>피드백 대화창</b>. 로그인 화면 문구와 관리자 메뉴 이름도 같게 바꿨습니다.</td></tr>
+<tr><td>기사 리포트 화면</td><td>날짜 검색과 표를 없애고, 로그인하면 <b>가장 최근 리포트가 큰 카드</b>로 나옵니다. 큰 "리포트 보기" 버튼, 지난 달은 월 버튼 목록입니다. 글자와 버튼을 키웠습니다(driver.css).</td></tr>
+<tr><td>열람·확인</td><td><b>PDF를 열면 자동으로 열람·확인 처리</b>됩니다. 별도의 "확인 완료" 버튼은 기사 화면에서 없어졌습니다. 자료가 교체되면(새 revision) 다시 열어야 확인됩니다.</td></tr>
+<tr><td>PDF 열기 방식</td><td>기존과 같이 새 탭으로 엽니다. 팝업이 막히면 같은 탭으로 엽니다. 같은 화면 안에서 보여 주는 뷰어는 이번에 넣지 않았습니다(아래 참고).</td></tr>
+<tr><td>공단 이름 일괄 연결</td><td>관리자 &gt; 기사 계정 &gt; <b>전체 연결</b> 버튼. 연결 안 된 기사를 계정 이름과 같은 공단 이름으로 연결합니다. 이미 연결된 기사는 바꾸지 않습니다. 이름이 겹치거나 비어 있으면 연결하지 않고 결과 창에 표시합니다.</td></tr>
+<tr><td>파일 등록 자동 매칭</td><td>파일명의 이름을 정규화(유니코드·공백)해 비교하고, 연결 전 계정은 계정 이름이 정확히 1건 일치할 때 등록 직전에 자동 연결합니다. 직접 선택한 계정이 미연결이면 확인 후 연결하므로 "먼저 공단 기사명 연결을 저장하세요" 오류로 막히지 않습니다.</td></tr>
+<tr><td>수집 안내 문구</td><td>옛 수집기(공단수집기_실행.bat) 안내를 새 수집기(run.bat) 흐름으로 바꿨습니다.</td></tr></table>
+<h2>적용 순서</h2><ol>
+<li><b>백업</b>: 현재 사이트 폴더(또는 GitHub 저장소)를 복사해 두고, Netlify Deploys에서 현재 정상 배포를 기록합니다.</li>
+<li><b>SQL 실행</b>: Supabase SQL Editor에서 <code>sql/13_link_all_and_autoack.sql</code> 하나만 실행합니다. 새 함수 <code>mr_api2</code>만 추가하며 기존 함수·표·자료를 바꾸지 않습니다. 오류가 나면 다음 단계로 넘어가지 말고 전체 오류 문구를 보관하세요.</li>
+<li><b>파일 반영</b>: 이 ZIP의 <code>safedriver</code> 안 파일과 폴더를 기존 사이트 루트에 같은 위치로 올립니다(index.html, assets/app.js, assets/monthly.js, assets/driver.css, netlify/functions/monthly.cjs, VERSION.txt 등). 가능하면 시험 브랜치로 먼저 올립니다.</li>
+<li><b>배포 확인</b>: Netlify 배포가 성공했는지, Functions에 <code>monthly</code>가 있는지 확인하고 Ctrl+F5로 새로고침합니다.</li>
+<li><b>전체 연결</b>: 관리자 로그인 &gt; 기사 계정 &gt; "전체 연결 (미연결 기사)". 결과 창의 충돌·빈 이름 목록을 확인합니다.</li></ol>
+<h2>시험 확인표 (시험용 기사 계정으로)</h2><ul>
+<li>□ 기사 로그인 → 가장 최근 리포트 카드가 바로 보이는가</li><li>□ Android 휴대폰에서 "리포트 보기"로 PDF가 열리는가</li><li>□ iPhone에서 PDF가 열리는가</li>
+<li>□ 열고 나서 돌아오면 "확인 완료"로 바뀌는가 / 관리자 확인현황에 반영되는가</li><li>□ 팝업을 막은 상태에서도 PDF가 열리는가</li>
+<li>□ 지난 달 리포트가 월 버튼으로 열리는가</li><li>□ 피드백 대화창에서 글을 보내고 관리자가 보는가</li>
+<li>□ 관리자: 전체 연결 후 파일명으로 기사가 자동 선택되는가, 한두 건 등록해 보기</li></ul>
+<h2>알려진 제한</h2><ul>
+<li>같은 화면 내장 PDF 뷰어는 넣지 않았습니다. Android 크롬은 페이지 안에서 PDF를 직접 표시하지 못하는 경우가 많고, PDF를 그리는 라이브러리를 이 환경에서 내려받아 시험할 수 없었습니다. 필요하면 라이브러리를 사이트에 포함하고 휴대폰에서 시험한 뒤 추가하는 별도 작업이 필요합니다.</li>
+<li>전체 연결은 접속 허용 계정을 "재직", 접속중단 계정을 "퇴사"로 표시합니다. 휴직 여부는 연결 후 기사 계정 화면에서 수정하세요.</li>
+<li>신규 입사자·퇴사자 등 앱 계정과 공단 명단이 다른 사람은 이번 작업에서 처리하지 않았습니다.</li></ul>
+<h2>되돌리기</h2><ol><li>Netlify Deploys에서 이전 정상 배포로 되돌립니다(화면·게이트웨이가 이전 상태로 돌아갑니다).</li><li>필요하면 <code>sql/13_rollback_optional.sql</code>로 새 함수만 삭제합니다. 이미 연결된 공단 이름은 자료이므로 그대로 남습니다.</li></ol>
+<h2>검증 범위</h2><p>실행·통과한 것: JS 문법 검사, 게이트웨이 시험 2종(새 동작이 mr_api2로만 전달되고 기존 동작은 그대로), 모의 화면 시험(기사 홈 표시, 열기→확인 기록 순서, 팝업 차단 대비, 실패 처리, 피드백 문구, 전체 연결 흐름, 파일명 매칭, 연결 후 등록). 실행하지 못한 것: Supabase에서의 SQL 실행, 실제 브라우저·휴대폰 화면, Netlify 배포. SQL은 코드 검토만 했습니다.</p>
+</main></body></html>

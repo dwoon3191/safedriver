@@ -1,5 +1,6 @@
 const {createHash,randomUUID}=require('node:crypto');
-const ALLOWED=new Set(['list','users','user_save','user_delete','prepare','verify','publish','unpublish','ack','opened','messages','message_add','upload','download']);
+const ALLOWED=new Set(['list','users','user_save','user_delete','prepare','verify','publish','unpublish','ack','opened','messages','message_add','upload','download','link_all','link_one','open_ack']);
+const V2=new Set(['link_all','link_one','open_ack']);
 const BUCKET='driver-monthly-private';
 exports.handler=async event=>{
  const reply=(statusCode,body)=>({statusCode,headers:{'Content-Type':'application/json','Cache-Control':'no-store'},body:JSON.stringify(body)});
@@ -15,6 +16,8 @@ exports.handler=async event=>{
    if(!res.ok)throw new Error(val.message||val.error||`HTTP ${res.status}`);return val;
   }
   const rpc=(a,d)=>request('/rest/v1/rpc/mr_api',{p_token:token,p_action:a,p_data:d});
+  const rpc2=(a,d)=>request('/rest/v1/rpc/mr_api2',{p_token:token,p_action:a,p_data:d});
+  if(V2.has(action))return reply(200,await rpc2(action,data));
   if(action==='upload'){
    const kind=data.kind,ext=String(data.ext||'').toLowerCase();
    if(!((kind==='pdf'&&ext==='pdf')||(kind==='excel'&&['xls','xlsx'].includes(ext))))throw Error('지원 파일: PDF, XLS, XLSX');

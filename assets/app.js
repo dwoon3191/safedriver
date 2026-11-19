@@ -277,13 +277,14 @@
   }
 
   function buildNav() {
+    document.body.classList.toggle('driver-mode', state.session.role !== 'admin');
     const admin = [
-      ['dashboard', '▦ 월별 종합진단표'], ['collector', '● 수집·등록'],
-      ['drivers', '♙ 기사 계정'], ['feedback', '◫ 피드백·지도'],
+      ['dashboard', '▦ 운행습관 리포트'], ['collector', '● 수집·등록'],
+      ['drivers', '♙ 기사 계정'], ['feedback', '◫ 피드백 대화창'],
       ['acks', '✓ 확인현황'], ['audit', '◷ 작업이력'],
       ['dispatch', '▤ 기존 배차표'], ['timetable', '▦ 기존 시간표'], ['settings', '⚙ 설정']
     ];
-    const driver = [['dashboard', '▦ 내 종합진단표'], ['feedback', '◫ 관리자와 대화'], ['settings', '⚙ 비밀번호/정보']];
+    const driver = [['dashboard', '▦ 운행습관 리포트'], ['feedback', '◫ 피드백 대화창'], ['settings', '⚙ 비밀번호/정보']];
     $('#nav').innerHTML = (state.session.role === 'admin' ? admin : driver)
       .map(([id, title]) => `<button class="nav-btn" data-page="${id}">${title}</button>`)
       .join('');
@@ -315,9 +316,9 @@
       settings: '설정',
     };
     $('#pageTitle').textContent = titles[page] || page;
-    $('#pageSubtitle').textContent = '대운교통 · 공단 월별 종합진단표 · 피드백';
+    $('#pageSubtitle').textContent = '대운교통 · 운행습관 리포트 · 피드백';
     $('#topActions').innerHTML = '';
-    const monthlyTitles={dashboard:'월별 종합진단표',collector:'공단 보고서 수집·등록',drivers:'기사 계정·공단 연결',feedback:'피드백·지도 이력',acks:'월별 확인현황'};
+    const monthlyTitles={dashboard:'운행습관 리포트',collector:'공단 보고서 수집·등록',drivers:'기사 계정·공단 연결',feedback:'피드백 대화창',acks:'월별 확인현황'};
     if(monthlyTitles[page]) $('#pageTitle').textContent=monthlyTitles[page];
     renderPage(page).catch(error => {
       $('#page').innerHTML = `<div class="notice warn">${esc(error.message)}</div>`;

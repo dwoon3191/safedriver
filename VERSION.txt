@@ -1,2 +1,2 @@
-2.0.0-rc1 Monthly Reports
-Release candidate: existing v1.4.x additive patch; eTAS live acceptance test required.
+2.1.0 Driver-friendly reports + link all
+Additive update on v2.0.0-rc1. Requires sql/13_link_all_and_autoack.sql. Not applied to production automatically.

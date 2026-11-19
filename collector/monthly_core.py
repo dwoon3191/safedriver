@@ -62,6 +62,11 @@ class Queue:
         self.db.commit()
     def rows(self):return [dict(r) for r in self.db.execute('select * from tasks order by month,name,kind')]
     def get(self,i):return dict(self.db.execute('select * from tasks where id=?',(i,)).fetchone())
+    def completed_valid(self,i):
+        t=self.get(i)
+        if t['status']!='완료' or not t['path'] or not t['hash']:return False
+        try:return hashlib.sha256(Path(t['path']).read_bytes()).hexdigest()==t['hash']
+        except OSError:return False
     def mark(self,i,status,reason=''):
         self.db.execute('update tasks set status=?,reason=? where id=?',(status,reason,i));self.db.commit()
     def store(self,i,source,root,manual=False):
