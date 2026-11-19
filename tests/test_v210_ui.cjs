@@ -31,22 +31,19 @@ const rows=[{id:'r9',user_id:'me',month:'2026-09-01',etas_name:'본인',has_pdf:
  let h=e.els['#page'].innerHTML;
  assert.match(h,/2026년 9월 운행습관 리포트/);assert.match(h,/새 리포트가 있습니다/);assert.match(h,/data-open="r9"/);assert.match(h,/지난 리포트/);assert.match(h,/2026년 8월/);
  assert.doesNotMatch(h,/type="month"|시작월|종료월|내 종합진단표/);assert.doesNotMatch(h,/엑셀/);
- // 2. open: download -> open_ack(revision) -> new tab; list refreshed
- await e.reg['data-open=r9'].onclick();await tick();
- const acts=e.calls.map(c=>c.action);assert.deepEqual(acts.slice(0,4),['list','download','open_ack','list']);
- assert.equal(e.calls[2].data.revision,3);assert.equal(e.opened[0].location,'https://x.test/a.pdf');assert.equal(e.opened[0].opener,null);
- // 3. popup blocked: ack recorded BEFORE same-tab navigation
- e=env('driver',async b=>b.action==='list'?rows:b.action==='download'?{url:'https://x.test/b.pdf'}:{ok:true},{blocked:true});
- await e.MR.render('dashboard',e.ctx);await e.reg['data-open=r9'].onclick();await tick();
- assert.equal(e.loc.href,'https://x.test/b.pdf');assert.equal(e.calls[e.loc.order-1].action,'open_ack');
- // 4. download failure closes the blank tab and records nothing
+ // 2. open without an in-app viewer (v2.2.0 keeps the link fallback): download -> open_ack(revision) -> same-tab link
+ let e2=env('driver',async b=>b.action==='list'?rows:b.action==='download'?{url:'https://x.test/a.pdf'}:{ok:true});
+ await e2.MR.render('dashboard',e2.ctx);await e2.reg['data-open=r9'].onclick();await tick();
+ assert.deepEqual(e2.calls.map(c=>c.action).slice(0,3),['list','download','open_ack']);assert.equal(e2.calls[2].data.revision,3);
+ assert.equal(e2.loc.href,'https://x.test/a.pdf');assert.equal(e2.calls[e2.loc.order-1].action,'open_ack');
+ // 3. download failure records nothing and does not navigate
  e=env('driver',async b=>{if(b.action==='list')return rows;if(b.action==='download')throw Error('접근할 수 없는 보고서입니다.');return{ok:true};});
  await e.MR.render('dashboard',e.ctx);await e.reg['data-open=r9'].onclick();await tick();
- assert.equal(e.opened[0].closed,true);assert.ok(!e.calls.some(c=>c.action==='open_ack'));assert.match(e.toasts.at(-1)[0],/접근/);
- // 5. open_ack failure does not block opening
+ assert.equal(e.loc.href,'');assert.ok(!e.calls.some(c=>c.action==='open_ack'));assert.match(e.toasts.at(-1)[0],/접근/);
+ // 4. open_ack failure does not block opening
  e=env('driver',async b=>{if(b.action==='list')return rows;if(b.action==='download')return{url:'https://x.test/c.pdf'};if(b.action==='open_ack')throw Error('자료가 교체되었습니다');return{}});
  await e.MR.render('dashboard',e.ctx);await e.reg['data-open=r9'].onclick();await tick();
- assert.equal(e.opened[0].location,'https://x.test/c.pdf');assert.ok(e.toasts.some(t=>/열람 기록 저장 실패/.test(t[0])));
+ assert.equal(e.loc.href,'https://x.test/c.pdf');assert.ok(e.toasts.some(t=>/열람 기록 저장 실패/.test(t[0])));
  // 6. no reports
  e=env('driver',async b=>b.action==='list'?[]:{});await e.MR.render('dashboard',e.ctx);assert.match(e.els['#page'].innerHTML,/아직 확인할 리포트가 없습니다/);
  // 7. driver feedback wording
@@ -81,5 +78,5 @@ const rows=[{id:'r9',user_id:'me',month:'2026-09-01',etas_name:'본인',has_pdf:
  e.reg['data-map=0'].value='d1';e.reg['data-map=0'].onchange();
  await e.els['#mrUpload'].onclick();await tick();
  assert.ok(!e.calls.some(c=>c.action==='link_one'||c.action==='upload'));assert.match(e.els['#mrQueue'].innerHTML,/연결을 취소/);
- console.log('PASS: v2.1.0 driver home, open+auto-ack, popup fallback, feedback wording, link-all, filename matching, link-before-upload');
+ console.log('PASS: v2.1.0 driver home, open+auto-ack (link fallback), feedback wording, link-all, filename matching, link-before-upload');
 })().catch(x=>{console.error(x);process.exit(1);});

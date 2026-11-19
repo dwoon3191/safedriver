@@ -1,2 +1,2 @@
-2.1.0 Driver-friendly reports + link all
-Additive update on v2.0.0-rc1. Requires sql/13_link_all_and_autoack.sql. Not applied to production automatically.
+2.2.0 Dispatch (오늘 근무) + in-app PDF + login cleanup
+Additive update on v2.0.0-rc1 (includes v2.1.0). Requires sql/13 (if not yet run) and sql/14_dispatch.sql. Not applied to production automatically.

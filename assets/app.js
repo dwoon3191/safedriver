@@ -179,6 +179,10 @@
   async function init() {
     loadCfg();
     if (!state.cfg.url || !state.cfg.key) {
+      // Drivers must never see URL/key fields. Only an administrator opening ".../#admin-setup" gets the form.
+      if (location.hash !== '#admin-setup') {
+        $('#setupView .auth-card').innerHTML = '<div class="brand-mark">D</div><h1>대운교통 SafeDrive</h1><p class="muted">접속 설정이 아직 완료되지 않았습니다.<br>관리자에게 문의해 주세요.</p>';
+      }
       show('setupView');
       return;
     }
@@ -245,7 +249,7 @@
     startUsageTracking();
     if (state.session.role === 'admin') await ensureAdminDeviceSetup();
     if (state.session.must_change_password) setTimeout(forcePasswordChange, 150);
-    navigate('dashboard');
+    navigate(state.session.role === 'admin' ? 'dashboard' : 'work');
   }
 
   async function ensureAdminDeviceSetup() {
@@ -279,12 +283,11 @@
   function buildNav() {
     document.body.classList.toggle('driver-mode', state.session.role !== 'admin');
     const admin = [
-      ['dashboard', '▦ 운행습관 리포트'], ['collector', '● 수집·등록'],
+      ['dashboard', '▦ 운행습관 리포트'], ['dpadmin', '▤ 배차 관리'], ['collector', '● 수집·등록'],
       ['drivers', '♙ 기사 계정'], ['feedback', '◫ 피드백 대화창'],
-      ['acks', '✓ 확인현황'], ['audit', '◷ 작업이력'],
-      ['dispatch', '▤ 기존 배차표'], ['timetable', '▦ 기존 시간표'], ['settings', '⚙ 설정']
+      ['acks', '✓ 확인현황'], ['audit', '◷ 작업이력'], ['settings', '⚙ 설정']
     ];
-    const driver = [['dashboard', '▦ 운행습관 리포트'], ['feedback', '◫ 피드백 대화창'], ['settings', '⚙ 비밀번호/정보']];
+    const driver = [['work', '▤ 오늘 근무'], ['dashboard', '▦ 운행습관 리포트'], ['feedback', '◫ 피드백 대화창'], ['settings', '⚙ 비밀번호/정보']];
     $('#nav').innerHTML = (state.session.role === 'admin' ? admin : driver)
       .map(([id, title]) => `<button class="nav-btn" data-page="${id}">${title}</button>`)
       .join('');
@@ -318,7 +321,7 @@
     $('#pageTitle').textContent = titles[page] || page;
     $('#pageSubtitle').textContent = '대운교통 · 운행습관 리포트 · 피드백';
     $('#topActions').innerHTML = '';
-    const monthlyTitles={dashboard:'운행습관 리포트',collector:'공단 보고서 수집·등록',drivers:'기사 계정·공단 연결',feedback:'피드백 대화창',acks:'월별 확인현황'};
+    const monthlyTitles={work:'오늘 근무',dpadmin:'배차 관리',dashboard:'운행습관 리포트',collector:'공단 보고서 수집·등록',drivers:'기사 계정·공단 연결',feedback:'피드백 대화창',acks:'월별 확인현황'};
     if(monthlyTitles[page]) $('#pageTitle').textContent=monthlyTitles[page];
     renderPage(page).catch(error => {
       $('#page').innerHTML = `<div class="notice warn">${esc(error.message)}</div>`;
@@ -328,6 +331,9 @@
   window.appGo = navigate;
 
   async function renderPage(page) {
+    if(['work','dpadmin'].includes(page)) {
+      return window.Dispatch.render(page,{state,token,rpc,toast,openModal,closeModal});
+    }
     if(['dashboard','reports','history','collector','drivers','feedback','acks'].includes(page)) {
       return window.MonthlyReports.render(page,{state,token,rpc,toast,openModal,closeModal});
     }

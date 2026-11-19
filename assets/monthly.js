@@ -41,15 +41,18 @@ window.MonthlyReports=(()=>{
  }
  async function openReport(id,page){
   const r=rows.find(x=>x.id===id);if(!r)throw Error('리포트를 찾을 수 없습니다. 화면을 새로고침하세요.');
-  // Open the blank tab inside the tap itself so phone browsers do not block it.
-  const w=window.open('about:blank','_blank');if(w){try{w.opener=null;}catch{}}
-  try{
-   const x=await api('download',{id,kind:'pdf'});
-   // Record "opened + confirmed" BEFORE leaving this page (the same-tab fallback unloads it).
-   if(!admin()){try{await api('open_ack',{id,revision:r.revision});}catch(err){ctx.toast('열람 기록 저장 실패: '+err.message,true);}}
-   if(w)w.location=x.url;else location.href=x.url;
-  }catch(err){try{w?.close();}catch{}throw err;}
-  render(page,ctx).catch(()=>{});
+  const ack=async()=>{if(!admin()){try{await api('open_ack',{id,revision:r.revision});}catch(err){ctx.toast('열람 기록 저장 실패: '+err.message,true);}}};
+  // 1) Show the PDF inside the app (no PDF app, no new tab). 2) If that fails for any reason, fall back to the signed link.
+  if(window.PdfViewer){
+   try{
+    const x=await api('download_bytes',{id,kind:'pdf'});
+    await window.PdfViewer.open(x.base64,{title:monthLabel(r.month)+' 운행습관 리포트',onClose:()=>{render(page,ctx).catch(()=>{});}});
+    await ack();return;
+   }catch(err){console.warn('in-app viewer failed, using link',err);}
+  }
+  const x=await api('download',{id,kind:'pdf'});
+  await ack(); // record before leaving this page
+  location.href=x.url;
  }
  function driverHome(page){
   const list=[...rows].sort((a,b)=>String(b.month).localeCompare(String(a.month)));

@@ -1,11 +1,13 @@
-대운교통 SafeDrive v2.1.0 업데이트 (v2.0.0-rc1 위에 덮어쓰기)
+대운교통 SafeDrive v2.2.0 업데이트 (v2.0.0-rc1 위에 덮어쓰기, v2.1.0 내용 포함)
 
-1. docs/UPDATE_2.1.0_KO.html 을 먼저 읽으세요.
+1. docs/UPDATE_2.2.0_KO.html 을 먼저 읽으세요.
 2. 기존 사이트 폴더와 GitHub 코드를 백업하세요.
-3. Supabase SQL Editor에서 sql/13_link_all_and_autoack.sql 하나만 실행합니다.
-   (sql/11, sql/12는 이미 적용되어 있어야 합니다. 다시 실행하지 않습니다.)
+3. Supabase SQL Editor에서 순서대로 실행합니다.
+   (a) sql/13_link_all_and_autoack.sql  ← 이미 실행했고 "전체 연결"이 동작하면 건너뜁니다.
+   (b) sql/14_dispatch.sql
+   롤백용 파일(*_rollback_optional.sql)은 실행하지 마세요. 브라우저 번역 기능은 끄세요.
 4. 이 폴더의 파일을 기존 사이트 루트에 합칩니다. config.js, app.css, 이미지, netlify.toml은 건드리지 않습니다.
-5. 배포 후 시험 기사 계정으로 휴대폰에서 PDF가 열리는지 확인합니다.
-6. 관리자 > 기사 계정 > "전체 연결" 버튼으로 공단 이름을 연결합니다.
+5. 배포 후 시험 기사 계정으로 휴대폰에서 "오늘 근무"와 PDF 보기를 확인합니다.
+6. 관리자 > 배차 관리에서 실제 CSV·XLS로 업로드를 시험합니다.
 
 이 폴더에는 config.js, service_role 키, 운영 데이터가 들어 있지 않습니다.
